@@ -111,7 +111,7 @@
 // NOLINTEND
 
 #if !defined(MS_LOG_DEV_LEVEL)
-	#define MS_LOG_DEV_LEVEL 0
+	#define MS_LOG_DEV_LEVEL 1
 #elif MS_LOG_DEV_LEVEL < 0 || MS_LOG_DEV_LEVEL > 3
 	#error "invalid MS_LOG_DEV_LEVEL macro value"
 #endif
