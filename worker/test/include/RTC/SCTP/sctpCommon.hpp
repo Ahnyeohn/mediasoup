@@ -1,10 +1,10 @@
-#ifndef MS_TEST_RTC_SCTP_CHUNKS_COMMON_HPP
-#define MS_TEST_RTC_SCTP_CHUNKS_COMMON_HPP
+#ifndef MS_TEST_RTC_SCTP_COMMON_HPP
+#define MS_TEST_RTC_SCTP_COMMON_HPP
 
 #include "common.hpp"
 #include "MediaSoupErrors.hpp"            // IWYU pragma: export
 #include "Utils.hpp"                      // IWYU pragma: export
-#include "helpers.hpp"                    // IWYU pragma: export in worker/test/include/
+#include "testHelpers.hpp"                // IWYU pragma: export in worker/test/include/
 #include "RTC/SCTP/packet/Chunk.hpp"      // IWYU pragma: export
 #include "RTC/SCTP/packet/ErrorCause.hpp" // IWYU pragma: export
 #include "RTC/SCTP/packet/Packet.hpp"     // IWYU pragma: export
@@ -15,30 +15,34 @@
 
 using namespace RTC::SCTP;
 
-// NOTE: We need to declare them here with `extern` and then define them in
-// helpers.cpp.
-extern thread_local uint8_t FactoryBuffer[66661];
-extern thread_local uint8_t SerializeBuffer[66662];
-extern thread_local uint8_t CloneBuffer[66663];
-extern thread_local uint8_t DataBuffer[66664];
-extern thread_local uint8_t ThrowBuffer[66665];
+namespace RTC
+{
+	namespace SCTP
+	{
+		// NOTE: We need to declare them here with `extern` and then define them in
+		// common.cpp.
+		extern thread_local uint8_t FactoryBuffer[66661];
+		extern thread_local uint8_t SerializeBuffer[66662];
+		extern thread_local uint8_t CloneBuffer[66663];
+		extern thread_local uint8_t DataBuffer[66664];
+		extern thread_local uint8_t ThrowBuffer[66665];
 
-void ResetBuffers();
+		void ResetBuffers();
+	} // namespace SCTP
+} // namespace RTC
 
-// clang-format off
 // NOLINTNEXTLINE (cppcoreguidelines-macro-usage)
-#define CHECK_PACKET(                                                                              \
-  /*const Packet**/ packet,                                                                        \
-  /*const uint8_t**/ buffer,                                                                       \
-  /*size_t*/ bufferLength,                                                                         \
-  /*size_t*/ length,                                                                               \
-  /*bool*/ frozen,                                                                                 \
-  /*uint16_t*/ sourcePort,                                                                         \
-  /*uint16_t*/ destinationPort,                                                                    \
-  /*uint32_t*/ verificationTag,                                                                    \
-  /*uint32_t*/ checksum,                                                                           \
-  /*hasValidCrc32cChecksum*/ hasValidCrc32cChecksum,                                               \
-  /*size_t*/ chunksCount)                                                                          \
+#define CHECK_SCTP_PACKET(/*const Packet**/ packet,                                                \
+                          /*const uint8_t**/ buffer,                                               \
+                          /*size_t*/ bufferLength,                                                 \
+                          /*size_t*/ length,                                                       \
+                          /*bool*/ frozen,                                                         \
+                          /*uint16_t*/ sourcePort,                                                 \
+                          /*uint16_t*/ destinationPort,                                            \
+                          /*uint32_t*/ verificationTag,                                            \
+                          /*uint32_t*/ checksum,                                                   \
+                          /*bool*/ hasValidCrc32cChecksum,                                         \
+                          /*size_t*/ chunksCount)                                                  \
 	do                                                                                               \
 	{                                                                                                \
 		REQUIRE(packet);                                                                               \
@@ -66,20 +70,19 @@ void ResetBuffers();
 	} while (false)
 
 // NOLINTNEXTLINE (cppcoreguidelines-macro-usage)
-#define CHECK_CHUNK(                                                                                 \
-  /*const Chunk**/ chunk,                                                                            \
-  /*uint8_t**/ buffer,                                                                               \
-  /*size_t*/ bufferLength,                                                                           \
-  /*size_t*/ length,                                                                                 \
-  /*bool*/ frozen,                                                                                   \
-  /*Chunk::ChunkType*/ chunkType,                                                                    \
-  /*bool*/ unknownType,                                                                              \
-  /*Chunk::ActionForUnknownChunkType*/ actionForUnknownChunkType,                                    \
-  /*uint8_t*/ flags,                                                                                 \
-  /*bool*/ canHaveParameters,                                                                        \
-  /*size_t*/ parametersCount,                                                                        \
-  /*bool*/ canHaveErrorCauses,                                                                       \
-  /*size_t*/ errorCausesCount)                                                                       \
+#define CHECK_SCTP_CHUNK(/*const Chunk**/ chunk,                                                     \
+                         /*uint8_t**/ buffer,                                                        \
+                         /*size_t*/ bufferLength,                                                    \
+                         /*size_t*/ length,                                                          \
+                         /*bool*/ frozen,                                                            \
+                         /*Chunk::ChunkType*/ chunkType,                                             \
+                         /*bool*/ unknownType,                                                       \
+                         /*Chunk::ActionForUnknownChunkType*/ actionForUnknownChunkType,             \
+                         /*uint8_t*/ flags,                                                          \
+                         /*bool*/ canHaveParameters,                                                 \
+                         /*size_t*/ parametersCount,                                                 \
+                         /*bool*/ canHaveErrorCauses,                                                \
+                         /*size_t*/ errorCausesCount)                                                \
 	do                                                                                                 \
 	{                                                                                                  \
 		REQUIRE(chunk);                                                                                  \
@@ -132,7 +135,7 @@ void ResetBuffers();
 	} while (false)
 
 // NOLINTNEXTLINE (cppcoreguidelines-macro-usage)
-#define CHECK_PARAMETER(                                                                            \
+#define CHECK_SCTP_PARAMETER(                                                                       \
   /*const Parameter**/ parameter,                                                                   \
   /*const uint8_t**/ buffer,                                                                        \
   /*size_t*/ bufferLength,                                                                          \
@@ -169,18 +172,16 @@ void ResetBuffers();
 		    ->Serialize(ThrowBuffer, length - 1),                                                       \
 		  MediaSoupError);                                                                              \
 		REQUIRE_THROWS_AS(parameter->Clone(ThrowBuffer, length - 1), MediaSoupError);                   \
-	}                                                                                                 \
-	while (false)
+	} while (false)
 
 // NOLINTNEXTLINE (cppcoreguidelines-macro-usage)
-#define CHECK_ERROR_CAUSE(                                                                         \
-  /*const ErrorCause**/ errorCause,                                                                \
-  /*const uint8_t**/ buffer,                                                                       \
-  /*size_t*/ bufferLength,                                                                         \
-  /*size_t*/ length,                                                                               \
-  /*bool*/ frozen,                                                                                 \
-  /*ErrorCause::ErrorCauseCode*/ causeCode,                                                        \
-  /*bool*/ unknownCode)                                                                            \
+#define CHECK_SCTP_ERROR_CAUSE(/*const ErrorCause**/ errorCause,                                   \
+                               /*const uint8_t**/ buffer,                                          \
+                               /*size_t*/ bufferLength,                                            \
+                               /*size_t*/ length,                                                  \
+                               /*bool*/ frozen,                                                    \
+                               /*ErrorCause::ErrorCauseCode*/ causeCode,                           \
+                               /*bool*/ unknownCode)                                               \
 	do                                                                                               \
 	{                                                                                                \
 		REQUIRE(errorCause);                                                                           \
@@ -208,8 +209,6 @@ void ResetBuffers();
 		    ->Serialize(ThrowBuffer, length - 1),                                                      \
 		  MediaSoupError);                                                                             \
 		REQUIRE_THROWS_AS(errorCause->Clone(ThrowBuffer, length - 1), MediaSoupError);                 \
-	}                                                                                                \
-	while (false)
-// clang-format on
+	} while (false)
 
 #endif
