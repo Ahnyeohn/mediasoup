@@ -573,7 +573,7 @@ namespace RTC
 	Producer::ReceiveRtpPacketResult Producer::ReceiveRtpPacket(RTC::RtpPacket* packet)
 	{
 		MS_TRACE();
-
+		//MS_ERROR_STD("debug");
 #ifdef MS_RTC_LOGGER_RTP
 		packet->logger.producerId = this->id;
 #endif

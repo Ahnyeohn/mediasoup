@@ -13,6 +13,114 @@
 #endif
 #include <cmath> // std::pow()
 
+// 추가: rtp 페이로드 분석
+static constexpr uint8_t MAGIC_BE[4] = { 0x4c, 0x41, 0x54, 0x4e }; // "LATN"
+static constexpr uint8_t MAGIC_LE[4] = { 0x4e, 0x54, 0x41, 0x4c }; // "NTAL" (JS little-endian로 쓴 경우)
+static constexpr size_t  LAT_HEADER_LEN = 32;
+
+static inline double NowEpochMs()
+{
+    using namespace std::chrono;
+    return duration<double, std::milli>(system_clock::now().time_since_epoch()).count();
+}
+
+static inline uint32_t ReadU32LE(const uint8_t* p)
+{
+    return (uint32_t)p[0]        |
+           ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16)|
+           ((uint32_t)p[3] << 24);
+}
+
+static inline double ReadF64LE(const uint8_t* p)
+{
+    // prefix를 little-endian uint64로 조립
+    uint64_t u =
+        (uint64_t)p[0]        |
+        ((uint64_t)p[1] << 8) |
+        ((uint64_t)p[2] << 16)|
+        ((uint64_t)p[3] << 24)|
+        ((uint64_t)p[4] << 32)|
+        ((uint64_t)p[5] << 40)|
+        ((uint64_t)p[6] << 48)|
+        ((uint64_t)p[7] << 56);
+
+    double d;
+    static_assert(sizeof(double) == sizeof(uint64_t));
+    std::memcpy(&d, &u, sizeof(double));
+    return d;
+}
+
+bool ParseFramePrefixforReceive(const uint8_t* payload, 
+					  size_t payloadLen, 
+					  RTC::RtpPacket::RtpPrefix* pfx)
+{	
+	if (!pfx) return false;
+    if (!payload || payloadLen < LAT_HEADER_LEN) return false;
+
+    // STAMP 확인
+	if (std::memcmp(payload, MAGIC_LE, 4) != 0) return false;
+	const uint32_t stamp = ReadU32LE(payload);
+
+	// 수신 시점 측정
+	const double SFUrecvMs =  NowEpochMs();
+	
+	// FrameID 읽기
+	const uint32_t frameID = ReadU32LE(payload + 4);
+
+    // sendTsMs 읽기 (offset 8)
+    const double sendTsMs = ReadF64LE(payload + 8);
+	if (!std::isfinite(sendTsMs)) return false;
+
+	//p2s latency 측정
+ 	const double p2s = SFUrecvMs - sendTsMs;
+
+	pfx->Stamp = stamp;
+	pfx->FrameID = frameID;
+	pfx->sendTsMs  = sendTsMs;
+	pfx->SFUrecvMs = SFUrecvMs;
+	pfx->p2s = p2s;
+    return true;
+}
+
+bool ParseFramePrefixforSend(const uint8_t* payload, 
+					         size_t payloadLen, 
+                             RTC::RtpPacket::RtpPrefix* pfx)
+{
+    if (!payload || payloadLen < LAT_HEADER_LEN) return false;
+
+    // STAMP 확인
+    if (std::memcmp(payload, MAGIC_LE, 4) != 0) return false;
+
+	// 송신 시점 측정
+	const double SFUsendMs = NowEpochMs();
+
+	pfx->SFUsendMs = SFUsendMs;
+
+    return true;
+}
+
+bool HasMagicPrefix(const uint8_t* payload, size_t payloadLen)
+{
+    if (!payload) {
+		//MS_ERROR_STD("no payload data");
+		return false;
+	} 
+	else if (payloadLen < 4) {
+		//MS_ERROR_STD("payload length < 4");
+		return false;
+	}
+
+    // JS에서 big-endian으로 썼다면:
+    if (std::memcmp(payload, MAGIC_BE, 4) == 0) return true;
+	else if (std::memcmp(payload, MAGIC_LE, 4) == 0) return true;
+    // JS에서 little-endian(true)로 썼다면:
+    // if (std::memcmp(payload, MAGIC_LE, 4) == 0) return true;
+	//MS_ERROR_STD("No Stamp");
+    return false;
+}
+// 추가: rtp 페이로드 분석
+
 namespace RTC
 {
 	/* Static. */
@@ -621,7 +729,7 @@ namespace RTC
 	  RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
-
+		////MS_ERROR_STD("debug");
 		// Increase receive transmission.
 		RTC::Transport::DataReceived(len);
 
@@ -791,7 +899,35 @@ namespace RTC
 
 			return;
 		}
+		
+		/** logger **/
+		//auto nowMs = DepLibUV::GetTimeMs();
+		//auto recvMs = packet->GetReceivedAtMs();
+		auto recvUs = packet->GetReceivedAtUs();
+		auto nowUs = DepLibUV::GetTimeUsInt64();
+		// if(recvMs == 0) {
+		// 	MS_ERROR_STD("receive is 0 ");
+		// }
+		auto delayUs = (recvUs != 0 ? (nowUs - recvUs) : 0);
 
+		// 추가: RTP 패킷의 각종 정보를 로깅하는 코드
+		// MS_ERROR_STD("[SFU_DELAY] ssrc=%" PRIu32 " seq=%" PRIu16 " timestamp=%" PRIu32 " packetsize=%zu payloadlength=%zu recvUs=%" PRIu64 " nowUs=%" PRIu64 " deltaUs=%" PRId64 "\n",
+    	// 	packet->GetSsrc(),
+    	// 	packet->GetSequenceNumber(),
+		// 	packet->GetTimestamp(),
+		// 	packet->GetSize(),
+		// 	packet->GetPayloadLength(),
+    	// 	recvUs,
+    	// 	nowUs,
+    	// 	delayUs);
+		if(!ParseFramePrefixforSend(packet->GetPayload(), packet->GetPayloadLength(), &packet->rtpPrefix)) {
+			const double SFUlatency = packet->rtpPrefix.SFUsendMs - packet->rtpPrefix.SFUrecvMs;
+			MS_ERROR_STD("[STAMP] FrameID=%d, sendTsMs= %.3f, SFUsendMs=%.3f, SFUrecvMs=%.3f, SFUlatency=%.3f", 
+				packet->rtpPrefix.Stamp, packet->rtpPrefix.sendTsMs, packet->rtpPrefix.SFUsendMs, packet->rtpPrefix.SFUrecvMs, SFUlatency);
+			
+		}
+		/** logger **/
+		
 		this->iceServer->GetSelectedTuple()->Send(data, len, cb);
 
 		// Increase send transmission.
@@ -927,7 +1063,7 @@ namespace RTC
 	  RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
-
+		//MS_ERROR_STD("debug");
 		// Increase receive transmission.
 		RTC::Transport::DataReceived(len);
 
@@ -1014,7 +1150,7 @@ namespace RTC
 	  RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
-
+		//MS_ERROR_STD("debug");
 		// Ensure DTLS is connected.
 		if (this->dtlsTransport->GetState() != RTC::DtlsTransport::DtlsState::CONNECTED)
 		{
@@ -1040,7 +1176,7 @@ namespace RTC
 		}
 
 		// Decrypt the SRTP packet.
-		if (!this->srtpRecvSession->DecryptSrtp(const_cast<uint8_t*>(data), &len))
+		if (!this->srtpRecvSession->DecryptSrtp(const_cast<uint8_t*>(data), &len)) // d
 		{
 			RTC::RtpPacket* packet = RTC::RtpPacket::Parse(data, len);
 
@@ -1072,9 +1208,17 @@ namespace RTC
 			return;
 		}
 
+		// 추가: SFU RTP 패킷 페이로드 확인 및 prefix를 찾는 코드
+		// 패킷이 복호화되고 나서부터 데이터를 읽을 수 있으므로 그 이후 진행
+		if(ParseFramePrefixforReceive(packet->GetPayload(), packet->GetPayloadLength(), &packet->rtpPrefix)) {
+		}
+
 		// Trick for clients performing aggressive ICE regardless we are ICE-Lite.
 		this->iceServer->MayForceSelectedTuple(tuple);
 
+		// 추가: SFU latency 측정을 위한 코드
+		auto nowUs = DepLibUV::GetTimeUsInt64();
+		packet->SetReceivedAtUs(nowUs);
 		// Pass the packet to the parent transport.
 		RTC::Transport::ReceiveRtpPacket(packet);
 	}
@@ -1131,7 +1275,7 @@ namespace RTC
 	  RTC::UdpSocket* socket, const uint8_t* data, size_t len, const struct sockaddr* remoteAddr)
 	{
 		MS_TRACE();
-
+		//MS_ERROR_STD("debug");
 		RTC::TransportTuple tuple(socket, remoteAddr);
 
 		OnPacketReceived(&tuple, data, len);
@@ -1151,7 +1295,7 @@ namespace RTC
 	  RTC::TcpConnection* connection, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
-
+		////MS_ERROR_STD("debug");
 		RTC::TransportTuple tuple(connection);
 
 		OnPacketReceived(&tuple, data, len);

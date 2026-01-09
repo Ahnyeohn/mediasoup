@@ -208,7 +208,7 @@ namespace RTC
 	void ActiveSpeakerObserver::ReceiveRtpPacket(RTC::Producer* producer, RTC::RtpPacket* packet)
 	{
 		MS_TRACE();
-
+		//MS_ERROR_STD("debug");
 		if (IsPaused())
 		{
 			return;

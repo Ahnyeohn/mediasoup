@@ -94,6 +94,7 @@
 		"debug": "^4.4.3",
 		"flatbuffers": "^25.9.23",
 		"h264-profile-level-id": "^2.3.2",
+		"mediasoup": "^3.19.14",
 		"node-fetch": "^3.3.2",
 		"supports-color": "^10.2.2",
 		"tar": "^7.5.2"

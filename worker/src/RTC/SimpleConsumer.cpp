@@ -316,7 +316,7 @@ namespace RTC
 	void SimpleConsumer::SendRtpPacket(RTC::RtpPacket* packet, RTC::SharedRtpPacket& sharedPacket)
 	{
 		MS_TRACE();
-
+		//MS_ERROR_STD();
 #ifdef MS_RTC_LOGGER_RTP
 		packet->logger.consumerId = this->id;
 #endif

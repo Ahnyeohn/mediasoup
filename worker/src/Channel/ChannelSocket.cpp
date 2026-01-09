@@ -131,7 +131,6 @@ namespace Channel
 	void ChannelSocket::Send(const uint8_t* data, uint32_t dataLen)
 	{
 		MS_TRACE_STD();
-
 		if (this->closed)
 		{
 			return;

@@ -78,13 +78,15 @@ namespace RTC
 		}
 
 		void Send(const uint8_t* data, size_t len, RTC::TransportTuple::onSendCallback* cb = nullptr)
-		{
+		{	
+			
 			if (this->protocol == Protocol::UDP)
-			{
+			{	
+				////MS_ERROR_STD("debug");
 				this->udpSocket->Send(data, len, this->udpRemoteAddr, cb);
 			}
 			else
-			{
+			{	
 				this->tcpConnection->Send(data, len, cb);
 			}
 		}

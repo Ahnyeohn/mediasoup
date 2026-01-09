@@ -41,9 +41,27 @@ namespace RTC
 			uint32_t timestamp;
 			uint32_t ssrc;
 		};
-
+		//추가: logger에 사용되는 프레임 내 첫 rtp 패킷 정보
+		struct RtpPrefix
+		{	
+			uint32_t  Stamp;
+			uint32_t FrameID;
+			double sendTsMs;
+			double SFUrecvMs;
+			double SFUsendMs;
+			double p2s;
+			double s2c;
+		};
+		RtpPrefix rtpPrefix;
+		void SetReceivedAtMs(uint64_t ms) { this->receivedAtMs = ms; }
+  		uint64_t GetReceivedAtMs() const { return this->receivedAtMs; }
+		void SetReceivedAtUs(uint64_t us) { this->receivedAtUs = us; }
+  		uint64_t GetReceivedAtUs() const { return this->receivedAtUs; }
+	private:
 	private:
 		/* Struct for RTP header extension. */
+		uint64_t receivedAtMs{0};
+		uint64_t receivedAtUs{0};
 		struct HeaderExtension
 		{
 			uint16_t id;

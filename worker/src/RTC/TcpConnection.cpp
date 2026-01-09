@@ -161,7 +161,7 @@ namespace RTC
 	void TcpConnection::Send(const uint8_t* data, size_t len, ::TcpConnectionHandle::onSendCallback* cb)
 	{
 		MS_TRACE();
-
+		//MS_ERROR_STD("debug");
 		// Write according to Framing RFC 4571.
 
 		uint8_t frameLen[2];

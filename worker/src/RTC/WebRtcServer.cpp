@@ -423,6 +423,7 @@ namespace RTC
 	inline void WebRtcServer::OnPacketReceived(RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
+		//MS_ERROR_STD("debug");
 
 		if (RTC::StunPacket::IsStun(data, len))
 		{
@@ -485,7 +486,7 @@ namespace RTC
 	  RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
-
+		//MS_ERROR_STD("debug");
 		auto it = this->mapTupleWebRtcTransport.find(tuple->hash);
 
 		if (it == this->mapTupleWebRtcTransport.end())
@@ -589,7 +590,7 @@ namespace RTC
 	  RTC::UdpSocket* socket, const uint8_t* data, size_t len, const struct sockaddr* remoteAddr)
 	{
 		MS_TRACE();
-
+		//MS_ERROR_STD("debug");
 		RTC::TransportTuple tuple(socket, remoteAddr);
 
 		OnPacketReceived(&tuple, data, len);
@@ -622,7 +623,7 @@ namespace RTC
 	  RTC::TcpConnection* connection, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
-
+		////MS_ERROR_STD("debug");
 		RTC::TransportTuple tuple(connection);
 
 		OnPacketReceived(&tuple, data, len);

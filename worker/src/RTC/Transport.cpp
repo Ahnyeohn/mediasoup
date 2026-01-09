@@ -1558,7 +1558,7 @@ namespace RTC
 	void Transport::ReceiveRtpPacket(RTC::RtpPacket* packet)
 	{
 		MS_TRACE();
-
+		
 #ifdef MS_RTC_LOGGER_RTP
 		packet->logger.recvTransportId = this->id;
 #endif

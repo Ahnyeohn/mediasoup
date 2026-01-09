@@ -31,6 +31,7 @@ inline static void onRecv(
   uv_udp_t* handle, ssize_t nread, const uv_buf_t* buf, const struct sockaddr* addr, unsigned int flags)
 {
 	auto* socket = static_cast<UdpSocketHandle*>(handle->data);
+	////MS_ERROR_STD("debug");
 
 	if (socket)
 	{
@@ -65,7 +66,7 @@ inline static void onCloseUdp(uv_handle_t* handle)
 UdpSocketHandle::UdpSocketHandle(uv_udp_t* uvHandle) : uvHandle(uvHandle)
 {
 	MS_TRACE();
-
+	MS_ERROR_STD("----debug---");
 	this->uvHandle->data = static_cast<void*>(this);
 
 	// NOLINTNEXTLINE(misc-const-correctness)
@@ -130,7 +131,7 @@ void UdpSocketHandle::Send(
   const uint8_t* data, size_t len, const struct sockaddr* addr, UdpSocketHandle::onSendCallback* cb)
 {
 	MS_TRACE();
-
+	//MS_ERROR_STD("debug");
 	if (this->closed)
 	{
 		if (cb)
@@ -196,7 +197,6 @@ send_libuv:
 			(*cb)(true);
 			delete cb;
 		}
-
 		return;
 	}
 	else if (sent >= 0)
@@ -211,10 +211,10 @@ send_libuv:
 			(*cb)(false);
 			delete cb;
 		}
-
 		return;
 	}
 	// Any error but legit EAGAIN. Use uv_udp_send().
+	// 버퍼나 큐 뷰족 이슈: UV_EAGAIN
 	else if (sent != UV_EAGAIN)
 	{
 		MS_WARN_DEV("uv_udp_try_send() failed, trying uv_udp_send(): %s", uv_strerror(sent));
@@ -388,6 +388,7 @@ inline void UdpSocketHandle::OnUvRecv(
   ssize_t nread, const uv_buf_t* buf, const struct sockaddr* addr, unsigned int flags)
 {
 	MS_TRACE();
+	////MS_ERROR_STD("debug");
 
 	// NOTE: Ignore if there is nothing to read or if it was an empty datagram.
 	if (nread == 0)

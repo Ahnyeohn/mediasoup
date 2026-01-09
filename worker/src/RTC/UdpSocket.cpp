@@ -49,7 +49,7 @@ namespace RTC
 	void UdpSocket::UserOnUdpDatagramReceived(const uint8_t* data, size_t len, const struct sockaddr* addr)
 	{
 		MS_TRACE();
-
+		////MS_ERROR_STD("debug");
 		if (!this->listener)
 		{
 			MS_ERROR("no listener set");
