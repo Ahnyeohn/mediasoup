@@ -923,7 +923,7 @@ export class RouterImpl<RouterAppData extends AppData = AppData>
 	async pipeToRouter({
 		producerId,
 		dataProducerId,
-		router,
+		router, // 원격 라우터 객체
 		keepId = true,
 		listenInfo,
 		listenIp,

@@ -291,7 +291,7 @@ namespace RTC
 	void RtpStreamSend::ReceiveRtcpReceiverReport(RTC::RTCP::ReceiverReport* report)
 	{
 		MS_TRACE();
-
+		//MS_ERROR_STD("");
 		/* Calculate RTT. */
 
 		// Get the NTP representation of the current timestamp.
@@ -323,10 +323,16 @@ namespace RTC
 		// Avoid negative RTT value since it doesn't make sense.
 		this->rtt = std::max(this->rtt, 0.0f);
 
-		this->packetsLost  = report->GetTotalLost();
-		this->fractionLost = report->GetFractionLost();
+		this->packetsLost  = report->GetTotalLost(); //int32_t 
+		this->fractionLost = report->GetFractionLost(); // uint8_t
 		this->jitter       = static_cast<float>(report->GetJitter());
 
+		// MS_ERROR_STD("SSRC:%" PRIu32 ", RTT:%.3f ms, fraction lost:%" PRIu8 ", cumulative number of packets lost:%" PRIi32, 
+		// 			report->GetSsrc(),
+		// 			this->rtt, 
+		// 			this->fractionLost, 
+		// 			this->packetsLost);
+					
 		// Update the score with the received RR.
 		UpdateScore(report);
 	}
@@ -335,7 +341,7 @@ namespace RTC
 	{
 		MS_TRACE();
 
-		this->lastRrReceivedMs = DepLibUV::GetTimeMs();
+		this->lastRrReceivedMs = DepLibUV::GetTimeMs(); 
 		this->lastRrTimestamp  = report->GetNtpSec() << 16;
 		this->lastRrTimestamp += report->GetNtpFrac() >> 16;
 	}

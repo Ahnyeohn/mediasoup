@@ -142,7 +142,7 @@ namespace RTC
 	  RTC::Consumer* consumer, RTC::RtpPacket* packet, const RTC::Transport::onSendCallback* cb)
 	{
 		MS_TRACE();
-
+		MS_ERROR_STD();
 		if (!consumer)
 		{
 			MS_WARN_TAG(rtp, "cannot send RTP packet not associated to a Consumer");

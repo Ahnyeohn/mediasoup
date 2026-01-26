@@ -2452,14 +2452,14 @@ namespace RTC
 	inline void Transport::OnProducerRtpPacketReceived(RTC::Producer* producer, RTC::RtpPacket* packet)
 	{
 		MS_TRACE();
-
+		//MS_ERROR_STD();
 		this->listener->OnTransportProducerRtpPacketReceived(this, producer, packet);
 	}
 
 	inline void Transport::OnProducerSendRtcpPacket(RTC::Producer* /*producer*/, RTC::RTCP::Packet* packet)
 	{
 		MS_TRACE();
-
+		
 		SendRtcpPacket(packet);
 	}
 
@@ -2475,6 +2475,7 @@ namespace RTC
 	inline void Transport::OnConsumerSendRtpPacket(RTC::Consumer* consumer, RTC::RtpPacket* packet)
 	{
 		MS_TRACE();
+		//MS_ERROR_STD();
 
 #ifdef MS_RTC_LOGGER_RTP
 		packet->logger.sendTransportId = this->id;
@@ -2492,7 +2493,8 @@ namespace RTC
 			packet->UpdateTransportWideCc01(this->transportWideCcSeq + 1)
 		)
 		// clang-format on
-		{
+		{	
+			//MS_ERROR_STD("no");
 			this->transportWideCcSeq++;
 
 			webrtc::RtpPacketSendInfo packetInfo;
@@ -2564,7 +2566,8 @@ namespace RTC
 #endif
 		}
 		else
-		{
+		{	
+			//MS_ERROR_STD("yes");
 			SendRtpPacket(consumer, packet);
 		}
 
@@ -2975,7 +2978,7 @@ namespace RTC
 	  const webrtc::PacedPacketInfo& pacingInfo)
 	{
 		MS_TRACE();
-
+		MS_ERROR_STD();
 		// Update abs-send-time if present.
 		packet->UpdateAbsSendTime(DepLibUV::GetTimeMs());
 

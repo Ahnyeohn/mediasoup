@@ -724,7 +724,7 @@ namespace RTC
 	void SimulcastConsumer::SendRtpPacket(RTC::RtpPacket* packet, RTC::SharedRtpPacket& sharedPacket)
 	{
 		MS_TRACE();
-
+		//MS_ERROR_STD();
 #ifdef MS_RTC_LOGGER_RTP
 		packet->logger.consumerId = this->id;
 #endif
@@ -1335,7 +1335,7 @@ namespace RTC
 	void SimulcastConsumer::ReceiveRtcpReceiverReport(RTC::RTCP::ReceiverReport* report)
 	{
 		MS_TRACE();
-
+		//MS_ERROR_STD("");
 		this->rtpStream->ReceiveRtcpReceiverReport(report);
 	}
 

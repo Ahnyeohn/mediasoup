@@ -805,7 +805,7 @@ namespace RTC
 	  RTC::Consumer* /*consumer*/, RTC::RtpPacket* packet, const RTC::Transport::onSendCallback* cb)
 	{
 		MS_TRACE();
-
+		MS_ERROR_STD();
 		if (!IsConnected())
 		{
 			if (cb)

@@ -653,7 +653,7 @@ namespace RTC
 	  RTC::Transport* /*transport*/, RTC::Producer* producer, RTC::RtpPacket* packet)
 	{
 		MS_TRACE();
-
+		//MS_ERROR_STD();
 #ifdef MS_RTC_LOGGER_RTP
 		packet->logger.routerId = this->id;
 #endif

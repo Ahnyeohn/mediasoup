@@ -178,6 +178,7 @@ int64_t PacedSender::UpdateTimeAndGetElapsedMs(int64_t now_us) {
 void PacedSender::Process() {
   int64_t now_us = DepLibUV::GetTimeUsInt64();
   int64_t elapsed_time_ms = UpdateTimeAndGetElapsedMs(now_us);
+  //
 
   if (paused_)
     return;

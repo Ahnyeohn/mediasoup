@@ -178,7 +178,7 @@ void BitrateProber::CreateProbeCluster(int bitrate_bps,
   TODO_PRINT_PROBING_STATE();
 }
 
-int BitrateProber::TimeUntilNextProbe(int64_t now_ms) {
+int BitrateProber::TimeUntil NextProbe(int64_t now_ms) {
   // TODO: Remove.
   TODO_PRINT_PROBING_STATE();
 

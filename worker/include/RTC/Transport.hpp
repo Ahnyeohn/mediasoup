@@ -346,6 +346,7 @@ namespace RTC
 		absl::flat_hash_map<uint32_t, RTC::Consumer*> mapSsrcConsumer;
 		absl::flat_hash_map<uint32_t, RTC::Consumer*> mapRtxSsrcConsumer;
 		TimerHandle* rtcpTimer{ nullptr };
+	protected:
 		std::shared_ptr<RTC::TransportCongestionControlClient> tccClient{ nullptr };
 		std::shared_ptr<RTC::TransportCongestionControlServer> tccServer{ nullptr };
 #ifdef ENABLE_RTC_SENDER_BANDWIDTH_ESTIMATOR
@@ -370,6 +371,7 @@ namespace RTC
 		uint32_t maxOutgoingBitrate{ 0u };
 		uint32_t minOutgoingBitrate{ 0u };
 		struct TraceEventTypes traceEventTypes;
+
 	};
 } // namespace RTC
 

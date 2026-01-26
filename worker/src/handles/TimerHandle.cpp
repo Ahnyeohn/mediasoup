@@ -50,7 +50,8 @@ TimerHandle::~TimerHandle()
 void TimerHandle::Start(uint64_t timeout, uint64_t repeat)
 {
 	MS_TRACE();
-
+	//MS_ERROR_STD();
+	
 	if (this->closed)
 	{
 		MS_THROW_ERROR("closed");
@@ -157,7 +158,7 @@ void TimerHandle::InternalClose()
 inline void TimerHandle::OnUvTimer()
 {
 	MS_TRACE();
-
+	//MS_ERROR_STD();
 	// Notify the listener.
 	this->listener->OnTimer(this);
 }
