@@ -92,12 +92,81 @@ type RouterData = {
 	rtpCapabilities: RtpCapabilities;
 };
 
+// ---------------------------------------------------------------------------
+// Experimental: piping media to a Router living in a different SFU process/host.
+// This is NOT part of upstream mediasoup. It assumes you run a small HTTP API
+// on the remote SFU that can create/connect PipeTransports and create Producers.
+// ---------------------------------------------------------------------------
+
+export type ExRouterEndpoint = {
+	// Base URL of the remote SFU control plane (example: "https://10.0.0.2:4443").
+	url: string;
+	// Destination Router id in the remote SFU.
+	roomId: string;
+	role: string;
+	// Optional bearer token (if your remote control plane requires auth).
+	authToken?: string;
+};
+
+type ExPipeTransportTuple = {
+	localAddress: string;
+	localPort: number;
+	protocol: TransportProtocol;
+};
+
+type ExPipeTransportInfo = {
+	id: string;
+	tuple: ExPipeTransportTuple;
+	// Present when enableSrtp=true in PipeTransport.
+	srtpParameters?: unknown;
+};
+
+type ExPipeTransportPair = {
+	localPipeTransport: PipeTransport;
+	remotePipeTransport: ExPipeTransportInfo;
+	remote: ExRouterEndpoint;
+};
+
+export type PipeToExRouterOptions = {
+	producerId?: string;
+	dataProducerId?: string;
+
+	remote: ExRouterEndpoint;
+
+	keepId?: boolean;
+
+	// Local listening parameters for the PipeTransport created in THIS Router.
+	// If neither is provided, defaults to { protocol: "udp", ip: "0.0.0.0" }.
+	listenInfo?: any; // keep it flexible to avoid extra type imports.
+	listenIp?: TransportListenIp | string;
+
+	enableSctp?: boolean;
+	numSctpStreams?: { OS: number; MIS: number };
+	enableRtx?: boolean;
+	enableSrtp?: boolean;
+};
+
+export type PipeToExRouterResult =
+	| {
+		pipeConsumer: Consumer;
+		remotePipeProducerId: string;
+		localPipeTransport: PipeTransport;
+		remotePipeTransportId: string;
+	  }
+	| {
+		pipeDataConsumer: DataConsumer;
+		remotePipeDataProducerId: string;
+		localPipeTransport: PipeTransport;
+		remotePipeTransportId: string;
+	  };
+//////////////////////////////////////////////////
+
 const logger = new Logger('Router');
 
 export class RouterImpl<RouterAppData extends AppData = AppData>
 	extends EnhancedEventEmitter<RouterEvents>
 	implements Router
-{
+{	
 	// Internal data.
 	readonly #internal: RouterInternal;
 
@@ -131,6 +200,13 @@ export class RouterImpl<RouterAppData extends AppData = AppData>
 		string,
 		Promise<PipeTransportPair>
 	> = new Map();
+
+	// Map of PipeTransport pair Promises indexed by remote endpoint key (url + routerId).
+	readonly #mapExRouterPairPipeTransportPairPromise: Map<
+		string,
+		Promise<ExPipeTransportPair>
+	> = new Map();
+
 
 	// Observer instance.
 	readonly #observer: RouterObserver =
@@ -1183,6 +1259,261 @@ export class RouterImpl<RouterAppData extends AppData = AppData>
 			// dataProducer exists, but TypeScript is not that smart.
 			throw new Error('internal error');
 		}
+	}
+
+
+	// -----------------------------------------------------------------------
+	// pipeToExRouter(): Pipe a local Producer/DataProducer into a remote Router
+	// (running in a different SFU process/host) via PipeTransport.
+	//
+	// IMPORTANT:
+	// - This requires a remote HTTP API that can:
+	//   1) createPipeTransport (remote side)
+	//   2) connectPipeTransport (remote side)
+	//   3) produce / produceData on that remote PipeTransport
+	//   4) (optional) closePipeTransport
+	//
+	// Endpoints assumed by this implementation (you can adapt paths easily):
+	//   POST <remote.url>/pipe/createPipeTransport
+	//   POST <remote.url>/pipe/connectPipeTransport
+	//   POST <remote.url>/pipe/produce
+	//   POST <remote.url>/pipe/produceData
+	//   POST <remote.url>/pipe/closePipeTransport
+	// -----------------------------------------------------------------------
+	async pipeToExRouter({
+		producerId,
+		dataProducerId,
+		remote,
+		keepId = true,
+		listenInfo,
+		listenIp,
+		enableSctp = true,
+		numSctpStreams = { OS: 1024, MIS: 1024 },
+		enableRtx = false,
+		enableSrtp = false,
+	}: PipeToExRouterOptions): Promise<PipeToExRouterResult> {
+		logger.debug('pipeToExRouter()');
+
+		if (!remote || !remote.url || !remote.roomId) {
+			throw new TypeError('missing remote { url, routerId }');
+		}
+		if (!producerId && !dataProducerId) {
+			throw new TypeError('missing producerId or dataProducerId');
+		}
+		if (producerId && dataProducerId) {
+			throw new TypeError('just producerId or dataProducerId can be given');
+		}
+
+		// Local default listenInfo.
+		if (!listenInfo && !listenIp) {
+			listenInfo = { protocol: 'udp', ip: '0.0.0.0' };
+		}
+
+		// Convert deprecated TransportListenIps to TransportListenInfos.
+		if (listenIp) {
+			if (typeof listenIp === 'string') {
+				listenIp = { ip: listenIp };
+			}
+
+			listenInfo = {
+				protocol: 'udp',
+				ip: (listenIp as TransportListenIp).ip,
+				announcedAddress: (listenIp as TransportListenIp).announcedIp,
+			};
+		}
+
+		let producer: Producer | undefined;
+		let dataProducer: DataProducer | undefined;
+
+		if (producerId) {
+			producer = this.#producers.get(producerId);
+
+			if (!producer) {
+				throw new TypeError('Producer not found');
+			}
+		} else if (dataProducerId) {
+			dataProducer = this.#dataProducers.get(dataProducerId);
+
+			if (!dataProducer) {
+				throw new TypeError('DataProducer not found');
+			}
+		}
+
+		const key = `${remote.url}::${remote.roomId}`;
+		let pairPromise = this.#mapExRouterPairPipeTransportPairPromise.get(key);
+		let pair: ExPipeTransportPair;
+
+		if (pairPromise) {
+			pair = await pairPromise;
+		} else {
+			pairPromise = (async (): Promise<ExPipeTransportPair> => {
+				const localPipeTransport = await this.createPipeTransport({
+					listenInfo: listenInfo!,
+					enableSctp,
+					numSctpStreams,
+					enableRtx,
+					enableSrtp,
+				});
+
+				// Create remote PipeTransport (remote decides its own listenInfo).
+				const remotePipeTransport = await this.#exPipeRequest<ExPipeTransportInfo>(
+					remote,
+					'/pipe/createPipeTransport',
+					{
+						roomId: remote.roomId,
+						enableSctp,
+						numSctpStreams,
+						enableRtx,
+						enableSrtp,
+					}
+				);
+
+				// Connect both sides.
+				await Promise.all([
+					localPipeTransport.connect({
+						ip: remotePipeTransport.tuple.localAddress,
+						port: remotePipeTransport.tuple.localPort,
+						srtpParameters: remotePipeTransport.srtpParameters as any,
+					}),
+					this.#exPipeRequest<void>(remote, '/pipe/connectPipeTransport', {
+						roomId: remote.roomId,
+						TransportId: remotePipeTransport.id,
+						ip: (localPipeTransport as any).tuple.localAddress,
+						port: (localPipeTransport as any).tuple.localPort,
+						srtpParameters: (localPipeTransport as any).srtpParameters,
+					}),
+				]);
+
+				// Cleanup: if local closes, close remote (best effort) and forget the pair.
+				localPipeTransport.observer.on('close', () => {
+					void this.#exPipeRequest<void>(remote, '/pipe/closePipeTransport', {
+						roomId: remote.roomId,
+						TransportId: remotePipeTransport.id,
+					}).catch(() => undefined);
+
+					this.#mapExRouterPairPipeTransportPairPromise.delete(key);
+				});
+
+				return { localPipeTransport, remotePipeTransport, remote };
+			})();
+
+			this.#mapExRouterPairPipeTransportPairPromise.set(key, pairPromise);
+
+			try {
+				pair = await pairPromise;
+			} catch (error) {
+				this.#mapExRouterPairPipeTransportPairPromise.delete(key);
+				throw error;
+			}
+		}
+
+		const localPipeTransport = pair.localPipeTransport;
+		const remotePipeTransport = pair.remotePipeTransport;
+
+		if (producer) {
+			// Create a local pipe Consumer and a remote pipe Producer.
+			const pipeConsumer = await (localPipeTransport as any).consume({
+				producerId: producer.id,
+			});
+
+			const remotePipeProducerId = await this.#exPipeRequest<string>(
+				remote,
+				'/pipe/produce',
+				{
+					roomId: remote.roomId,
+					TransportId: remotePipeTransport.id,
+					// If requested, preserve the original Producer id.
+					id: keepId ? (producer as any).id : utils.generateUUIDv4(),
+					kind: (pipeConsumer as any).kind,
+					rtpParameters: (pipeConsumer as any).rtpParameters,
+					paused: (pipeConsumer as any).producerPaused,
+					appData: (producer as any).appData,
+				}
+			);
+
+			// Ensure that the producer has not been closed in the meanwhile.
+			if ((producer as any).closed) {
+				throw new InvalidStateError('original Producer closed');
+			}
+
+			return {
+				pipeConsumer,
+				remotePipeProducerId,
+				localPipeTransport,
+				remotePipeTransportId: remotePipeTransport.id,
+			};
+		} else if (dataProducer) {
+			const pipeDataConsumer = await (localPipeTransport as any).consumeData({
+				dataProducerId: (dataProducer as any).id,
+			});
+
+			const remotePipeDataProducerId = await this.#exPipeRequest<string>(
+				remote,
+				'/pipe/produceData',
+				{
+					roomId: remote.roomId,
+					TransportId: remotePipeTransport.id,
+					id: keepId ? (dataProducer as any).id : utils.generateUUIDv4(),
+					sctpStreamParameters: (pipeDataConsumer as any).sctpStreamParameters,
+					label: (pipeDataConsumer as any).label,
+					protocol: (pipeDataConsumer as any).protocol,
+					appData: (dataProducer as any).appData,
+				}
+			);
+
+			if ((dataProducer as any).closed) {
+				throw new InvalidStateError('original DataProducer closed');
+			}
+
+			return {
+				pipeDataConsumer,
+				remotePipeDataProducerId,
+				localPipeTransport,
+				remotePipeTransportId: remotePipeTransport.id,
+			};
+		} else {
+			throw new Error('internal error');
+		}
+	}
+
+	// Basic JSON POST helper for talking to the remote SFU control plane.
+	async #exPipeRequest<T>(
+		remote: ExRouterEndpoint,
+		path: string,
+		body: any
+	): Promise<T> {
+		const fetchFn: any = (globalThis as any).fetch;
+
+		if (!fetchFn) {
+			throw new Error('global fetch() is not available (Node 18+ required)');
+		}
+
+		const url = remote.url.replace(/\/$/, '') + path;
+
+		const res = await fetchFn(url, {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/json',
+				...(remote.authToken ? { authorization: `Bearer ${remote.authToken}` } : {}),
+			},
+			body: JSON.stringify(body ?? {}),
+		});
+
+		if (!res.ok) {
+			const text = await res.text().catch(() => '');
+			throw new Error(
+				`pipeToExRouter remote request failed [${res.status} ${res.statusText}] ${text}`
+			);
+		}
+
+		// Some endpoints may return no content.
+		const ct = res.headers?.get?.('content-type') ?? '';
+		if (ct.includes('application/json')) {
+			return (await res.json()) as T;
+		}
+		// If response is plain text, return it when T is string.
+		const raw = await res.text().catch(() => '');
+		return raw as unknown as T;
 	}
 
 	addPipeTransportPair(

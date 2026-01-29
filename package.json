@@ -92,6 +92,7 @@
 	},
 	"dependencies": {
 		"debug": "^4.4.3",
+		"express": "^5.2.1",
 		"flatbuffers": "^25.9.23",
 		"h264-profile-level-id": "^2.3.2",
 		"mediasoup": "^3.19.14",
