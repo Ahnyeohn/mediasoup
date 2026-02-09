@@ -1285,8 +1285,8 @@ export class RouterImpl<RouterAppData extends AppData = AppData>
 		dataProducerId,
 		remote,
 		keepId = true,
-		listenInfo,
-		listenIp,
+		listenInfo, //
+		listenIp, 
 		enableSctp = true,
 		numSctpStreams = { OS: 1024, MIS: 1024 },
 		enableRtx = false,
@@ -1304,9 +1304,9 @@ export class RouterImpl<RouterAppData extends AppData = AppData>
 			throw new TypeError('just producerId or dataProducerId can be given');
 		}
 
-		// Local default listenInfo.
+		// Local default listenInfo. (orgin의 자기 주소)
 		if (!listenInfo && !listenIp) {
-			listenInfo = { protocol: 'udp', ip: '0.0.0.0' };
+			listenInfo = { protocol: 'udp', ip: '10.20.13.197' }; // hard coding
 		}
 
 		// Convert deprecated TransportListenIps to TransportListenInfos.
@@ -1377,7 +1377,7 @@ export class RouterImpl<RouterAppData extends AppData = AppData>
 					}),
 					this.#exPipeRequest<void>(remote, '/pipe/connectPipeTransport', {
 						roomId: remote.roomId,
-						TransportId: remotePipeTransport.id,
+						transportId: remotePipeTransport.id,
 						ip: (localPipeTransport as any).tuple.localAddress,
 						port: (localPipeTransport as any).tuple.localPort,
 						srtpParameters: (localPipeTransport as any).srtpParameters,
@@ -1388,7 +1388,7 @@ export class RouterImpl<RouterAppData extends AppData = AppData>
 				localPipeTransport.observer.on('close', () => {
 					void this.#exPipeRequest<void>(remote, '/pipe/closePipeTransport', {
 						roomId: remote.roomId,
-						TransportId: remotePipeTransport.id,
+						transportId: remotePipeTransport.id,
 					}).catch(() => undefined);
 
 					this.#mapExRouterPairPipeTransportPairPromise.delete(key);
@@ -1411,7 +1411,7 @@ export class RouterImpl<RouterAppData extends AppData = AppData>
 		const remotePipeTransport = pair.remotePipeTransport;
 
 		if (producer) {
-			// Create a local pipe Consumer and a remote pipe Producer.
+			// local pipe Consumer 생성, 이후 remote pipe Producer를 생성하도록 요청
 			const pipeConsumer = await (localPipeTransport as any).consume({
 				producerId: producer.id,
 			});
@@ -1421,7 +1421,7 @@ export class RouterImpl<RouterAppData extends AppData = AppData>
 				'/pipe/produce',
 				{
 					roomId: remote.roomId,
-					TransportId: remotePipeTransport.id,
+					transportId: remotePipeTransport.id,
 					// If requested, preserve the original Producer id.
 					id: keepId ? (producer as any).id : utils.generateUUIDv4(),
 					kind: (pipeConsumer as any).kind,
@@ -1452,7 +1452,7 @@ export class RouterImpl<RouterAppData extends AppData = AppData>
 				'/pipe/produceData',
 				{
 					roomId: remote.roomId,
-					TransportId: remotePipeTransport.id,
+					transportId: remotePipeTransport.id,
 					id: keepId ? (dataProducer as any).id : utils.generateUUIDv4(),
 					sctpStreamParameters: (pipeDataConsumer as any).sctpStreamParameters,
 					label: (pipeDataConsumer as any).label,
@@ -1490,29 +1490,74 @@ export class RouterImpl<RouterAppData extends AppData = AppData>
 
 		const url = remote.url.replace(/\/$/, '') + path;
 
+		//
+		const safeJson = (v: any) => {
+			try {
+			return JSON.stringify(v ?? null, null, 2);
+			} catch (e: any) {
+			return `<<JSON.stringify failed: ${e?.message ?? String(e)}>>`;
+			}
+		};
+		const trunc = (s: string, n = 4000) => (s.length > n ? s.slice(0, n) + '\n...<truncated>' : s);
+
+		//request log
+		logger.debug(
+			`[exPipeRequest] POST ${url}\n` +
+			`headers=${safeJson({
+			'content-type': 'application/json',
+			...(remote.authToken ? { authorization: `Bearer <redacted>` } : {}),
+			})}\n` +
+			`body=${trunc(safeJson(body ?? {}))}`
+		);
+
 		const res = await fetchFn(url, {
 			method: 'POST',
 			headers: {
-				'content-type': 'application/json',
-				...(remote.authToken ? { authorization: `Bearer ${remote.authToken}` } : {}),
+			'content-type': 'application/json',
+			...(remote.authToken ? { authorization: `Bearer ${remote.authToken}` } : {}),
 			},
 			body: JSON.stringify(body ?? {}),
 		});
 
+		const ct = res.headers?.get?.('content-type') ?? '';
+
+		// 에러
 		if (!res.ok) {
 			const text = await res.text().catch(() => '');
+			logger.debug(
+			`[exPipeRequest] ERROR ${url}\n` +
+			`status=${res.status} ${res.statusText}\n` +
+			`content-type=${ct}\n` +
+			`body=${trunc(text)}`
+			);
 			throw new Error(
-				`pipeToExRouter remote request failed [${res.status} ${res.statusText}] ${text}`
+			`pipeToExRouter remote request failed [${res.status} ${res.statusText}] ${text}`
 			);
 		}
 
-		// Some endpoints may return no content.
-		const ct = res.headers?.get?.('content-type') ?? '';
+		// log + parse
 		if (ct.includes('application/json')) {
-			return (await res.json()) as T;
+			const json = (await res.json()) as T;
+
+			logger.debug(
+			`[exPipeRequest] OK ${url}\n` +
+			`status=${res.status} ${res.statusText}\n` +
+			`content-type=${ct}\n` +
+			`json=${trunc(safeJson(json))}`
+			);
+
+			return json;
 		}
-		// If response is plain text, return it when T is string.
+
 		const raw = await res.text().catch(() => '');
+
+		logger.debug(
+			`[exPipeRequest] OK ${url}\n` +
+			`status=${res.status} ${res.statusText}\n` +
+			`content-type=${ct}\n` +
+			`raw=${trunc(raw)}`
+		);
+
 		return raw as unknown as T;
 	}
 
