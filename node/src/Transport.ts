@@ -587,7 +587,7 @@ export abstract class TransportImpl<
 		pipe = false,
 		appData,
 	}: ConsumerOptions<ConsumerAppData>): Promise<Consumer<ConsumerAppData>> {
-		logger.debug('consume()');
+		//logger.debug('consume()');
 
 		if (!producerId || typeof producerId !== 'string') {
 			throw new TypeError('missing producerId');

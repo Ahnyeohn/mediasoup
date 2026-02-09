@@ -560,7 +560,7 @@ namespace RTC
 	void TransportCongestionControlClient::OnTimer(TimerHandle* timer)
 	{
 		MS_TRACE();
-		MS_ERROR_STD();
+		//MS_ERROR_STD();
 		if (timer == this->processTimer)
 		{
 			// Time to call RtpTransportControllerSend::Process().

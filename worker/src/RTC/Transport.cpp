@@ -2978,7 +2978,7 @@ namespace RTC
 	  const webrtc::PacedPacketInfo& pacingInfo)
 	{
 		MS_TRACE();
-		MS_ERROR_STD();
+		//MS_ERROR_STD();
 		// Update abs-send-time if present.
 		packet->UpdateAbsSendTime(DepLibUV::GetTimeMs());
 
