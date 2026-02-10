@@ -1306,7 +1306,7 @@ export class RouterImpl<RouterAppData extends AppData = AppData>
 
 		// Local default listenInfo. (orgin의 자기 주소)
 		if (!listenInfo && !listenIp) {
-			listenInfo = { protocol: 'udp', ip: '10.20.13.197' }; // hard coding
+			listenInfo = { protocol: 'udp', ip: String(process.env['SERVER_IP']) }; // hard coding: 수정완료
 		}
 
 		// Convert deprecated TransportListenIps to TransportListenInfos.
