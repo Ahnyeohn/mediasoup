@@ -1282,7 +1282,7 @@ export class RouterImpl<RouterAppData extends AppData = AppData>
 	// -----------------------------------------------------------------------
 	async pipeToExRouter({
 		producerId,
-		dataProducerId,
+		dataProducerId,0
 		remote,
 		keepId = true,
 		listenInfo, //
