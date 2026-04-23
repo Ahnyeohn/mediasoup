@@ -2917,6 +2917,7 @@ namespace RTC
 
 		if (!dataProducer)
 		{
+			MS_WARN_TAG(sctp, "[TELEMETRY] raw SCTP payload streamId:%u ppid:%u payload:%.*s", streamId, ppid, static_cast<int>(len), reinterpret_cast<const char*>(msg));
 			MS_WARN_TAG(
 			  sctp, "no suitable DataProducer for received SCTP message [streamId:%" PRIu16 "]", streamId);
 
