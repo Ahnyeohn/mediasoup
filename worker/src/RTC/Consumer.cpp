@@ -6,6 +6,12 @@
 #include "Logger.hpp"
 #include "MediaSoupErrors.hpp"
 
+static inline double NowEpochMs()
+{
+	using namespace std::chrono;
+	return duration<double, std::milli>(system_clock::now().time_since_epoch()).count();
+}
+
 namespace RTC
 {
 	/* Instance methods. */
@@ -360,6 +366,22 @@ namespace RTC
 				break;
 			}
 
+			case Channel::ChannelRequest::Method::CONSUMER_GET_SYNC_CLOCK:
+			{
+				const auto nowMs = this->GetSyncClockMs();
+				//const auto* body = request->data->body_as<FBS::Consumer::SetRecvDeadlineRequest>();
+
+				auto responseOffset =
+				  FBS::Consumer::CreateGetSyncClockResponse(
+				    request->GetBufferBuilder(), nowMs);
+
+				request->Accept(
+				  FBS::Response::Body::Consumer_GetSyncClockResponse,
+				  responseOffset);
+
+				break;
+			}
+
 			default:
 			{
 				MS_THROW_ERROR("unknown method '%s'", request->methodCStr);
@@ -474,7 +496,7 @@ namespace RTC
 		{
 			auto rtpPacketDump = packet->FillBuffer(this->shared->channelNotifier->GetBufferBuilder());
 			auto traceInfo     = FBS::Consumer::CreateKeyFrameTraceInfo(
-        this->shared->channelNotifier->GetBufferBuilder(), rtpPacketDump, isRtx);
+			  this->shared->channelNotifier->GetBufferBuilder(), rtpPacketDump, isRtx);
 
 			auto notification = FBS::Consumer::CreateTraceNotification(
 			  this->shared->channelNotifier->GetBufferBuilder(),
@@ -490,7 +512,7 @@ namespace RTC
 		{
 			auto rtpPacketDump = packet->FillBuffer(this->shared->channelNotifier->GetBufferBuilder());
 			auto traceInfo     = FBS::Consumer::CreateRtpTraceInfo(
-        this->shared->channelNotifier->GetBufferBuilder(), rtpPacketDump, isRtx);
+			  this->shared->channelNotifier->GetBufferBuilder(), rtpPacketDump, isRtx);
 
 			auto notification = FBS::Consumer::CreateTraceNotification(
 			  this->shared->channelNotifier->GetBufferBuilder(),
@@ -578,4 +600,36 @@ namespace RTC
 		  FBS::Notification::Body::Consumer_TraceNotification,
 		  notification);
 	}
+
+	// yun
+	// void Consumer::SetRecvDeadline(
+	//   const std::string& producerId,
+	//   uint32_t rtpTimestamp,
+	//   const std::string& latestDecodeTimeNtp,
+	//   double oneWayDelay)
+	// {
+	// 	this->recvDeadlineInfo.producerId          = producerId;
+	// 	this->recvDeadlineInfo.rtpTimestamp        = rtpTimestamp;
+	// 	this->recvDeadlineInfo.latestDecodeTimeNtp = latestDecodeTimeNtp;
+	// 	this->recvDeadlineInfo.oneWayDelay         = oneWayDelay;
+
+	// 	MS_ERROR_STD(
+	// 	  "recv-deadline updated [consumerId:%s, producerId:%s, rtpTimestamp:%u, ntp:%s, delay:%f]",
+	// 	  this->id.c_str(),
+	// 	  producerId.c_str(),
+	// 	  rtpTimestamp,
+	// 	  latestDecodeTimeNtp.c_str(),
+	// 	  oneWayDelay);
+	// }
+
+	// const RecvDeadlineInfo& Consumer::GetRecvDeadlineInfo() const
+	// {
+	// 	return this->recvDeadlineInfo;
+	// }
+
+	double Consumer::GetSyncClockMs() const
+	{
+		return NowEpochMs();
+	}
+
 } // namespace RTC

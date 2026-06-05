@@ -49,6 +49,7 @@ namespace RTC
 			  RTC::TransportCongestionControlClient* tccClient,
 			  RTC::RtpPacket* packet,
 			  const webrtc::PacedPacketInfo& pacingInfo) = 0;
+			virtual void OnPacketLossCheck(double hasLoss) = 0;
 		};
 
 	public:

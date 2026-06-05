@@ -59,8 +59,7 @@ const logger = new Logger('Consumer');
 
 export class ConsumerImpl<ConsumerAppData extends AppData = AppData>
 	extends EnhancedEventEmitter<ConsumerEvents>
-	implements Consumer
-{
+	implements Consumer {
 	// Internal data.
 	readonly #internal: ConsumerInternal;
 
@@ -227,7 +226,7 @@ export class ConsumerImpl<ConsumerAppData extends AppData = AppData>
 				requestOffset,
 				this.#internal.transportId
 			)
-			.catch(() => {});
+			.catch(() => { });
 
 		this.emit('@close');
 
@@ -327,6 +326,38 @@ export class ConsumerImpl<ConsumerAppData extends AppData = AppData>
 		if (wasPaused && !this.#producerPaused) {
 			this.#observer.safeEmit('resume');
 		}
+	}
+
+	// async getSyncClock(): Promise<number> {
+	// 	logger.debug('getSyncClock()');
+
+	// 	const response = await this.#channel.request(
+	// 		FbsRequest.Method.CONSUMER_GET_SYNC_CLOCK,
+	// 		undefined,
+	// 		undefined,
+	// 		this.#internal.consumerId
+	// 	);
+
+	// 	const data = new FbsConsumer.GetSyncClockResponse();
+	// 	response.body(data);
+
+	// 	return Number(data.timeMs());
+	// }
+
+	async getSyncClock(): Promise<number> {
+		//logger.debug('getSyncClock()');
+
+		const response = await this.#channel.request(
+			FbsRequest.Method.CONSUMER_GET_SYNC_CLOCK,
+			undefined,
+			undefined,
+			this.#internal.consumerId
+		);
+
+		const data = new FbsConsumer.GetSyncClockResponse();
+		response.body(data);
+
+		return Number(data.timeMs());
 	}
 
 	async setPreferredLayers({
@@ -776,10 +807,10 @@ function parseBaseConsumerDump(
 		consumableRtpEncodings:
 			data.consumableRtpEncodingsLength() > 0
 				? fbsUtils.parseVector(
-						data,
-						'consumableRtpEncodings',
-						parseRtpEncodingParameters
-					)
+					data,
+					'consumableRtpEncodings',
+					parseRtpEncodingParameters
+				)
 				: undefined,
 		traceEventTypes: fbsUtils.parseVector(
 			data,

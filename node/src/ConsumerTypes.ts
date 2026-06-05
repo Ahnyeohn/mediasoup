@@ -363,6 +363,7 @@ export interface Consumer<
 	 */
 	resume(): Promise<void>;
 
+	getSyncClock(): Promise<number>;
 	/**
 	 * Set preferred video layers.
 	 */

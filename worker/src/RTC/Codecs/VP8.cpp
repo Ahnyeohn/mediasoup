@@ -30,7 +30,8 @@ namespace RTC
 			payloadDescriptor->extended       = (byte >> 7) & 0x01;
 			payloadDescriptor->nonReference   = (byte >> 5) & 0x01;
 			payloadDescriptor->start          = (byte >> 4) & 0x01;
-			payloadDescriptor->partitionIndex = byte & 0x07;
+			payloadDescriptor->partitionIndex = byte & 0x0F; // ✅ 4 bits 이게 문제라고???
+			//payloadDescriptor->partitionIndex = byte & 0x07;
 
 			if (payloadDescriptor->extended)
 			{

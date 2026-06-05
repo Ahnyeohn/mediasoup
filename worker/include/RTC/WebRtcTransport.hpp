@@ -12,8 +12,59 @@
 #include "RTC/Transport.hpp"
 #include "RTC/TransportTuple.hpp"
 #include "RTC/UdpSocket.hpp"
+
+// yeon: deadline slack
+#include "RTC/FrameRecord.hpp"
+#include "RTC/NetworkState.hpp"
+#include "RTC/SlackPredictor.hpp"
+#include "RTC/FrameRecordCsvWriter.hpp"
 #include <vector>
 
+// yeon: (pacer 구현)
+#include <cmath>
+#include <cstdint>
+#include <deque>
+
+// -------------------------------------------------------------------
+// App message kind
+// -------------------------------------------------------------------
+enum class AppMessageKind
+{
+	None,
+	Latency,
+	SyncReq,
+	SyncResp,
+	Chat,
+	Unknown
+};
+
+struct ParsedSctpAppMessage
+{
+	AppMessageKind kind{ AppMessageKind::None };
+
+	// SCTP DATA chunk metadata
+	uint16_t sid{ 0 };
+	uint16_t ssn{ 0 };
+	uint32_t ppid{ 0 };
+	uint32_t tsn{ 0 };
+
+	// Raw text payload
+	std::string text;
+
+	// Common parsed fields
+	uint32_t seq{ 0 };
+
+	// sync_req
+	double t1ViewMs{ 0.0 };
+
+	// sync_resp
+	double t2SfuMs{ 0.0 };
+
+	// latency
+	double s2cMs{ 0.0 };
+
+	bool valid{ false };
+};
 namespace RTC
 {
 	class WebRtcTransport : public RTC::Transport,
@@ -91,6 +142,11 @@ namespace RTC
 		  uint32_t ppid,
 		  onQueuedCallback* cb = nullptr) override;
 		void SendSctpData(const uint8_t* data, size_t len) override;
+		// yeon
+		void HandleParsedAppMessage(const ParsedSctpAppMessage& msg);
+		void SendSyncResponse(uint16_t sid, uint32_t seq, double t1ViewMs, double t2SfuMs);
+		void SendTextMessageToSctpStream(uint16_t sid, const std::string& payload);
+
 		void RecvStreamClosed(uint32_t ssrc) override;
 		void SendStreamClosed(uint32_t ssrc) override;
 		void OnPacketReceived(RTC::TransportTuple* tuple, const uint8_t* data, size_t len);
@@ -164,7 +220,159 @@ namespace RTC
 		bool connectCalled{ false };
 		std::vector<RTC::IceCandidate> iceCandidates;
 		RTC::DtlsTransport::Role dtlsRole{ RTC::DtlsTransport::Role::AUTO };
+
+		//------// pacing으로 추가한 부분
+		// yeon: (pacer 구현)
+	private:
+		struct PendingRtp
+		{
+			RTC::SharedRtpPacket sharedPacket;  // owns a cloned RTP packet
+			RTC::Consumer* consumer{ nullptr }; // valid while transport alive (same worker thread)
+			const RTC::Transport::onSendCallback* cb{ nullptr }; // must call + delete
+			uint64_t enqueuedAtMs{ 0 };
+		};
+
+		class TokenBucketPacer
+		{
+		public:
+			explicit TokenBucketPacer(WebRtcTransport* transport);
+			~TokenBucketPacer();
+
+			void SetPacingRate(uint32_t bps);        // 일단 고정값 사용
+			void SetBucketSize(uint32_t burketSize); // controls bucket size
+			void SetQueueLimits(uint32_t maxDelayMs, size_t maxBytes);
+			// 업데이트
+			void UpdateBucketSize();
+			void IncreaseBucketSize();
+			void DecreaseBucketSize();
+			void UpdatePredictedQueueBytes();
+
+			// Enqueue a packet
+			void Enqueue(
+			  RTC::Consumer* consumer, RTC::RtpPacket* packet, const RTC::Transport::onSendCallback* cb);
+
+			// Called when transport is closing to cleanup
+			void StopAndFlush(bool sent);
+
+			// 버킷 사이즈 업데이트에 반영하기 위한 네트워크 상황 지표
+			void SetRttMs(double rttMs);
+			void NotifyPacketLoss();
+
+			// getter method
+			double GetLinkCapacityBytesPerMs() const;
+			double GetPacingRate();
+			double GetBucketSize() const;
+			size_t IsLossDetected() const;
+			void SetLinkCapacityBytesPerMs(double value);
+			void SetLossDetected(double value);
+
+		private:
+			void EnsureTimer();
+			void PacerTimer(uint64_t delayMs);
+			void OnTimer();
+			void Refill(uint64_t nowMs);
+
+			bool TrySendOne(uint64_t nowMs);
+			bool ShouldDrop(const PendingRtp& item, uint64_t nowMs) const;
+
+		public:
+			WebRtcTransport* transport{ nullptr };
+
+			// copa style의 RTT 계산을 위함: min RTT, Long RTT
+			struct RttSample
+			{
+				int64_t timeMs;
+				double rttMs;
+			};
+			std::deque<RttSample> rttHistory;
+
+			// Token bucket state (bytes-based)
+			double tokenRateBytesPerMs{ 0.0 };
+			double bucketCapacityBytes{ 0.0 };
+			double tokensBytes{ 0.0 };
+			uint64_t lastRefillMs{ 0 };
+
+			// ACE: pacer 관련 필드
+			double additiveStepBytes{ 1200.0 };
+			double alpha{ 0.8 };
+			// queue size에 대한 threshold
+			double queueThresholdBytes{ 12000.0 };
+			// historical bucket when buffer empty
+			double historicalEmptyBucketBytes{ 0.0 };
+			// recent pre-loss queue size
+			double lastQueueBytesBeforeLoss{ 0.0 };
+			// 추정한 network queue size
+			double predictedQueueBytes{ 0.0 };
+
+			double minBucketBytes{ 1200.0 };
+			// double maxBucketBytes{ 256 * 1024.0 };
+
+			size_t maxQueueBytes{ 2 * 1024 * 1024 }; // default 2MB
+
+			bool hasHistoricalInfo{ false };
+			size_t lossDetected{ 0 };
+			size_t previousFrameBytes{ 0 };
+
+			double latestRttMs{ 0.0 };   // 최근 RTT값
+			double srttMs{ 0.0 };        // copa style: queue delay 추정
+			double standingRttMs{ 0.0 }; // copa style: queue delay 추정
+			double minRttMs{ 0.0 };
+			double queueDelayMs{ 0.0 };           // copa style: queue delay 추정
+			double linkCapacityBytesPerMs{ 0.0 }; // 최근 link capacity: packetpair를 사용해야 하지만,
+			                                      // 일단 현재는 gcc 비트레이트 사용
+
+			int64_t flowStartTimeMs{ 0 }; // copa style: queue delay 추정
+			bool started{ false };        // copa style: queue delay 추정
+
+			// Queue
+			std::deque<PendingRtp> q;
+			size_t queuedBytes{ 0 };
+
+			// Safety limits
+			uint32_t maxQueueDelayMs{ 200 }; // default
+
+			// libuv timer (same worker loop)
+			uv_timer_t timer{};
+			bool timerInited{ false };
+
+			// Config
+			uint32_t burstWindowMs{ 20 }; // default
+		public:
+			// 이전 프레임 사이즈 측정을 위한 필드
+			uint32_t currentFrameTimestamp{ 0 };
+			size_t currentFrameBytes{ 0 };
+			bool frameInit{ false };
+			void ObservePacketForFrame(const RTC::RtpPacket* pkt);
+		};
+
+		// yeon: pacer bitrate 즉, pacing rate를 조절하기 위해 사용하는 함수
+	protected:
+		void OnAvailableBitrateChanged(uint32_t availableBitrate) override;
+		void OnPacketLossDetected(double loss) override;
+		void OnRttUpdated(double rttMs) override;
+		void OnSlack(const uint8_t* msg, size_t len) override;
+
+	private:
+		// yeon: TokenBucketPacer을 하나만 두고 소유를 함부로 주지 못하게
+		std::unique_ptr<TokenBucketPacer> rtpPacer;
+		std::unique_ptr<RTC::SlackPredictor> slackPredictor;
+		bool predictFrameInit{ false };
+		uint32_t currentPredictFrameTimestamp{ 0 };
+		std::optional<double> currentPredictedSlack;
+		std::unordered_map<uint32_t, double> pendingPredictedSlackByFrame;
+		
+		// Helper: actual immediate send path (your existing code moved here)
+		void SendRtpPacketNow(
+		  RTC::Consumer* consumer, RTC::RtpPacket* packet, const RTC::Transport::onSendCallback* cb);
+		void PredictSlack(RTC::RtpPacket* packet);
+		//------// pacing으로 추가한 부분
+		// yeon: deadline slack
+	public:
+		std::unique_ptr<RTC::NetworkState> networkState;
+		std::unique_ptr<RTC::FrameRecordTable> frameRecordTable;
+		std::unique_ptr<RTC::FrameRecordCsvWriter> frameRecordCsvWriter;
 	};
+
 } // namespace RTC
 
 #endif

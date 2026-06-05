@@ -32,6 +32,24 @@ table SetPriorityResponse {
     priority: uint8;
 }
 
+// yun
+table SetRecvDeadlineRequest {
+	producerId: string;
+	rtpTimestamp: uint32;
+	latestDecodeTimeNtp: string;
+	oneWayDelay: double;
+}
+
+// yeon
+table GetSyncClockRequest {
+}
+
+table GetSyncClockResponse {
+    // SFU worker clock in ms.
+    // IMPORTANT: use the same clock basis as SFUsendMs.
+    timeMs: double;
+}
+
 enum TraceEventType: uint8 {
     KEYFRAME = 0,
     FIR,

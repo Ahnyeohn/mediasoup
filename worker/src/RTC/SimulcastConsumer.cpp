@@ -12,6 +12,18 @@
 #endif
 #include <limits> // std::numeric_limits
 
+// simulcast vp8 파싱
+#include <cstddef>
+#include <cstdint>
+
+#include <array>
+#include <unordered_map>
+
+// yeon: 네트워크 상황이 악화되어도 spatial layer를 고정시켜서 slack이 어떻게 변하는지 확인하기 위함
+static bool forceSpatialLayerEnabled = true;
+static int16_t forcedSpatialLayer    = 2;
+static int16_t forcedTemporalLayer   = 0; // 지금 L1T1이면 temporal은 0
+
 namespace RTC
 {
 	/* Static. */
@@ -21,6 +33,118 @@ namespace RTC
 	static constexpr uint64_t BweDowngradeMinActiveMs{ 8000u };
 	static constexpr uint16_t MaxSequenceNumberGap{ 100u };
 	static constexpr size_t TargetLayerRetransmissionBufferSize{ 30u };
+
+	struct Vp8DescInfo
+	{
+		bool hasPictureId{ false };
+		uint16_t pictureId{ 0 };
+
+		bool hasTl0PicIdx{ false };
+		uint8_t tl0PicIdx{ 0 };
+
+		bool hasTid{ false };
+		uint8_t tid{ 0 }; // 0..3
+	};
+
+	// Returns true if parsed something meaningful. Safe for short payloads.
+	static bool ParseVp8PayloadDescriptor(const uint8_t* payload, size_t len, Vp8DescInfo& out)
+	{
+		if (!payload || len < 1)
+		{
+			return false;
+		}
+
+		size_t i         = 0;
+		const uint8_t b0 = payload[i++];
+
+		const bool X = (b0 & 0x80) != 0; // extension present
+		if (!X)
+		{
+			// No extension => no PictureID/TL0PICIDX/TID in this minimal parser.
+			return true;
+		}
+
+		if (i >= len)
+		{
+			return false;
+		}
+		const uint8_t x1 = payload[i++];
+
+		const bool I = (x1 & 0x80) != 0;
+		const bool L = (x1 & 0x40) != 0;
+		const bool T = (x1 & 0x20) != 0;
+		const bool K = (x1 & 0x10) != 0;
+
+		// PictureID (I)
+		if (I)
+		{
+			if (i >= len)
+			{
+				return false;
+			}
+			uint8_t pic = payload[i++];
+
+			if (pic & 0x80)
+			{
+				// 16-bit PictureID (15 bits used)
+				if (i >= len)
+				{
+					return false;
+				}
+				uint8_t pic2     = payload[i++];
+				out.hasPictureId = true;
+				out.pictureId    = static_cast<uint16_t>(((pic & 0x7F) << 8) | pic2);
+			}
+			else
+			{
+				// 8-bit PictureID
+				out.hasPictureId = true;
+				out.pictureId    = pic;
+			}
+		}
+
+		// TL0PICIDX (L)
+		if (L)
+		{
+			if (i >= len)
+			{
+				return false;
+			}
+			out.hasTl0PicIdx = true;
+			out.tl0PicIdx    = payload[i++];
+		}
+
+		// TID/KEYIDX byte exists if T or K is set.
+		if (T || K)
+		{
+			if (i >= len)
+			{
+				return false;
+			}
+			const uint8_t tk = payload[i++];
+
+			if (T)
+			{
+				out.hasTid = true;
+				out.tid    = static_cast<uint8_t>((tk >> 6) & 0x03);
+			}
+		}
+
+		return true;
+	}
+
+	static int FindEncodingIdxBySsrc(const RTC::RtpParameters& rtpParameters, uint32_t ssrc)
+	{
+		for (size_t i = 0; i < rtpParameters.encodings.size(); ++i)
+		{
+			const auto& enc = rtpParameters.encodings[i];
+			if (enc.ssrc == ssrc || enc.rtx.ssrc == ssrc)
+			{
+				return static_cast<int>(i);
+			}
+		}
+		return -1;
+	}
 
 	/* Instance methods. */
 
@@ -68,8 +192,7 @@ namespace RTC
 				this->preferredLayers.spatial = static_cast<int16_t>(encoding.spatialLayers - 1);
 			}
 
-			if (auto preferredTemporalLayer = preferredLayers->temporalLayer();
-			    preferredTemporalLayer.has_value())
+			if (auto preferredTemporalLayer = preferredLayers->temporalLayer(); preferredTemporalLayer.has_value())
 			{
 				this->preferredLayers.temporal = preferredTemporalLayer.value();
 
@@ -410,6 +533,7 @@ namespace RTC
 	uint32_t SimulcastConsumer::IncreaseLayer(uint32_t bitrate, bool considerLoss)
 	{
 		MS_TRACE();
+		// MS_ERROR_STD("IncreaseLayer()");
 
 		MS_ASSERT(this->externallyManagedBitrate, "bitrate is not externally managed");
 		MS_ASSERT(IsActive(), "should be active");
@@ -724,7 +848,7 @@ namespace RTC
 	void SimulcastConsumer::SendRtpPacket(RTC::RtpPacket* packet, RTC::SharedRtpPacket& sharedPacket)
 	{
 		MS_TRACE();
-		//MS_ERROR_STD();
+		// MS_ERROR_STD();
 #ifdef MS_RTC_LOGGER_RTP
 		packet->logger.consumerId = this->id;
 #endif
@@ -1037,8 +1161,7 @@ namespace RTC
 			// packet.
 			// NOTE: We drop it in RTP sequence manager because this packet belongs
 			// to current spatial layer.
-			if (SeqManager<uint16_t>::IsSeqLowerThan(
-			      packet->GetSequenceNumber(), this->snReferenceSpatialLayer))
+			if (SeqManager<uint16_t>::IsSeqLowerThan(packet->GetSequenceNumber(), this->snReferenceSpatialLayer))
 			{
 #ifdef MS_RTC_LOGGER_RTP
 				packet->logger.Discarded(
@@ -1049,8 +1172,9 @@ namespace RTC
 
 				return;
 			}
-			else if (SeqManager<uint16_t>::IsSeqHigherThan(
-			           packet->GetSequenceNumber(), this->snReferenceSpatialLayer + MaxSequenceNumberGap))
+			else if (
+			  SeqManager<uint16_t>::IsSeqHigherThan(
+			    packet->GetSequenceNumber(), this->snReferenceSpatialLayer + MaxSequenceNumberGap))
 			{
 				this->checkingForOldPacketsInSpatialLayer = false;
 			}
@@ -1151,6 +1275,380 @@ namespace RTC
 				this->lastSentPacketHasMarker = packet->HasMarker();
 			}
 
+			// MS_ERROR_STD("Temporal layer: %u, current termproal layer: %d", packet->GetTemporalLayer(),
+			// this->encodingContext->GetCurrentTemporalLayer());
+
+			// static uint64_t lastLogMs = 0;
+			// const uint64_t nowMs      = DepLibUV::GetTimeMs();
+
+			// // 1초에 1번만 찍기(로그 폭발 방지)
+			// if (nowMs - lastLogMs >= 1000)
+			// {
+			// 	lastLogMs = nowMs;
+
+			// 	const uint32_t ssrc = packet->GetSsrc();
+			// 	const uint32_t ts   = packet->GetTimestamp();
+			// 	const uint16_t seq  = packet->GetSequenceNumber();
+
+			// 	// 1) encodingIdx / rid / ssrc
+			// 	int encodingIdx = FindEncodingIdxBySsrc(this->rtpParameters, ssrc);
+
+			// 	const char* ridStr = "unknown";
+			// 	if (encodingIdx >= 0 && static_cast<size_t>(encodingIdx) <
+			// this->rtpParameters.encodings.size())
+			// 	{
+			// 		const auto& enc = this->rtpParameters.encodings[static_cast<size_t>(encodingIdx)];
+			// 		// enc.rid가 std::string이면: 맞음
+			// 		ridStr = enc.rid.c_str();
+			// 	}
+
+			// 	// 2) VP8 descriptor: PictureID / TL0PICIDX / TID
+			// 	Vp8DescInfo info;
+			// 	const uint8_t* payload = packet->GetPayload();
+			// 	const size_t plen      = packet->GetPayloadLength();
+			// 	ParseVp8PayloadDescriptor(payload, plen, info);
+
+			// 	// 보기 좋게 출력 값 구성
+			// 	int tidOut = info.hasTid ? static_cast<int>(info.tid) : -1;
+			// 	int picOut = info.hasPictureId ? static_cast<int>(info.pictureId) : -1;
+			// 	int tl0Out = info.hasTl0PicIdx ? static_cast<int>(info.tl0PicIdx) : -1;
+
+			// 	MS_ERROR_STD(
+			// 	  "[SIMULCAST_DBG] encIdx=%d rid=%s ssrc=%" PRIu32 " seq=%" PRIu16 " ts=%" PRIu32
+			// 	  " tid=%d picId=%d tl0=%d",
+			// 	  encodingIdx,
+			// 	  ridStr,
+			// 	  ssrc,
+			// 	  seq,
+			// 	  ts,
+			// 	  tidOut,
+			// 	  picOut,
+			// 	  tl0Out);
+			// }
+
+			//===== BEGIN: 1초 요약 로그 =====
+			// struct SimulcastDbgAgg
+			// {
+			// 	uint32_t lastTs{ 0 };
+			// 	bool hasLastTs{ false };
+
+			// 	uint32_t allFrames{ 0 };
+			// 	uint32_t keyFrames{ 0 };
+
+			// 	std::array<uint32_t, 4> tidPkts{ 0, 0, 0, 0 };   // 0,1,2,unk
+			// 	std::array<uint32_t, 4> tidFrames{ 0, 0, 0, 0 }; // 0,1,2,unk
+
+			// 	int lastEncodingIdx{ -1 };
+			// };
+
+			// static uint64_t dbgWindowStartMs{ 0 };
+			// static std::unordered_map<uint32_t, SimulcastDbgAgg> dbgAggBySsrc;
+
+			// const uint64_t dbgNowMs = DepLibUV::GetTimeMs();
+			// if (dbgWindowStartMs == 0)
+			// {
+			// 	dbgWindowStartMs = dbgNowMs;
+			// }
+
+			// const uint32_t dbgSsrc = packet->GetSsrc();
+			// const uint32_t dbgTs   = packet->GetTimestamp();
+
+			// int dbgTid = static_cast<int>(packet->GetTemporalLayer());
+			// if (dbgTid < 0 || dbgTid > 2)
+			// {
+			// 	dbgTid = 3; // unknown
+			// }
+
+			// // 현재 패킷이 어느 encoding에 속하는지 추정
+			// int dbgEncodingIdx = -1;
+			// for (size_t i = 0; i < this->rtpParameters.encodings.size(); ++i)
+			// {
+			// 	const auto& enc = this->rtpParameters.encodings[i];
+			// 	if (enc.ssrc == dbgSsrc)
+			// 	{
+			// 		dbgEncodingIdx = static_cast<int>(i);
+			// 		break;
+			// 	}
+			// }
+
+			// auto& dbgSt           = dbgAggBySsrc[dbgSsrc];
+			// dbgSt.lastEncodingIdx = dbgEncodingIdx;
+
+			// // timestamp 변화 = 새 frame
+			// if (!dbgSt.hasLastTs || dbgSt.lastTs != dbgTs)
+			// {
+			// 	dbgSt.hasLastTs = true;
+			// 	dbgSt.lastTs    = dbgTs;
+
+			// 	dbgSt.allFrames++;
+			// 	dbgSt.tidFrames[dbgTid]++;
+
+			// 	if (packet->IsKeyFrame())
+			// 	{
+			// 		dbgSt.keyFrames++;
+			// 	}
+			// }
+
+			// dbgSt.tidPkts[dbgTid]++;
+
+			// if (dbgNowMs - dbgWindowStartMs >= 1000)
+			// {
+			// 	auto targetLayers = this->GetTargetLayers();
+
+			// 	for (auto& kv : dbgAggBySsrc)
+			// 	{
+			// 		const uint32_t logSsrc = kv.first;
+			// 		const auto& logSt      = kv.second;
+
+			// 		MS_ERROR_STD(
+			// 		  "[SIMULCAST_SUMMARY] ssrc=%" PRIu32
+			// 		  " encIdx=%d"
+			// 		  " targetSpatial=%d targetTemporal=%d"
+			// 		  " frames=%" PRIu32 "/s keyFrames=%" PRIu32
+			// 		  "/s"
+			// 		  " tid_frames=[0:%" PRIu32 ",1:%" PRIu32 ",2:%" PRIu32 ",unk:%" PRIu32
+			// 		  "]"
+			// 		  " tid_pkts=[0:%" PRIu32 ",1:%" PRIu32 ",2:%" PRIu32 ",unk:%" PRIu32 "]",
+			// 		  logSsrc,
+			// 		  logSt.lastEncodingIdx,
+			// 		  static_cast<int>(targetLayers.spatial),
+			// 		  static_cast<int>(targetLayers.temporal),
+			// 		  logSt.allFrames,
+			// 		  logSt.keyFrames,
+			// 		  logSt.tidFrames[0],
+			// 		  logSt.tidFrames[1],
+			// 		  logSt.tidFrames[2],
+			// 		  logSt.tidFrames[3],
+			// 		  logSt.tidPkts[0],
+			// 		  logSt.tidPkts[1],
+			// 		  logSt.tidPkts[2],
+			// 		  logSt.tidPkts[3]);
+			// 	}
+
+			// 	dbgAggBySsrc.clear();
+			// 	dbgWindowStartMs = dbgNowMs;
+			// }
+
+			// ===== DEBUG: consumer forwarding temporal layer + actual frame fps =====
+			// struct FrameAgg
+			// {
+			// 	// 현재 열려 있는 frame 상태
+			// 	uint32_t currentTs{ 0 };
+			// 	bool hasCurrentTs{ false };
+
+			// 	// 현재 frame 대표 정보
+			// 	bool currentFrameIsKey{ false };
+			// 	bool currentFrameFirstPacketSeen{ false };
+			// 	int currentFrameFirstTid{ 3 }; // 0,1,2,unk
+
+			// 	// 1초 윈도우 집계
+			// 	uint32_t frames{ 0 };
+			// 	uint32_t keyFrames{ 0 };
+
+			// 	// 패킷 기준 / frame 기준 TID 분포
+			// 	std::array<uint32_t, 4> tidPkts{ 0, 0, 0, 0 };
+			// 	std::array<uint32_t, 4> tidFrames{ 0, 0, 0, 0 };
+
+			// 	// 현재 frame 내부 패킷 TID 관측
+			// 	std::array<uint32_t, 4> frameTidSeen{ 0, 0, 0, 0 };
+
+			// 	int lastEncodingIdx{ -1 };
+			// };
+
+			// static uint64_t dbgWindowStartMs{ 0 };
+			// static std::unordered_map<uint32_t, FrameAgg> dbgBySsrc;
+
+			// const uint64_t dbgNowMs = DepLibUV::GetTimeMs();
+			// if (dbgWindowStartMs == 0)
+			// {
+			// 	dbgWindowStartMs = dbgNowMs;
+			// }
+
+			// const uint32_t dbgSsrc = packet->GetSsrc();
+			// const uint32_t dbgTs   = packet->GetTimestamp();
+
+			// int dbgTid = static_cast<int>(packet->GetTemporalLayer());
+			// if (dbgTid < 0 || dbgTid > 2)
+			// {
+			// 	dbgTid = 3; // unknown
+			// }
+
+			// // 현재 패킷이 어느 encoding에 속하는지 추정
+			// int dbgEncodingIdx = -1;
+			// for (size_t i = 0; i < this->rtpParameters.encodings.size(); ++i)
+			// {
+			// 	const auto& enc = this->rtpParameters.encodings[i];
+			// 	if (enc.ssrc == dbgSsrc)
+			// 	{
+			// 		dbgEncodingIdx = static_cast<int>(i);
+			// 		break;
+			// 	}
+			// }
+
+			// auto finalizeFrame = [](FrameAgg& st)
+			// {
+			// 	if (!st.hasCurrentTs)
+			// 	{
+			// 		return;
+			// 	}
+
+			// 	st.frames++;
+
+			// 	if (st.currentFrameIsKey)
+			// 	{
+			// 		st.keyFrames++;
+			// 	}
+
+			// 	// 현재 frame의 대표 TID = frame 내부에서 가장 많이 나온 TID
+			// 	uint32_t bestIdx = 3; // default unknown
+			// 	uint32_t bestVal = st.frameTidSeen[3];
+
+			// 	for (uint32_t i = 0; i < 3; ++i)
+			// 	{
+			// 		if (st.frameTidSeen[i] >= bestVal)
+			// 		{
+			// 			bestVal = st.frameTidSeen[i];
+			// 			bestIdx = i;
+			// 		}
+			// 	}
+
+			// 	st.tidFrames[bestIdx]++;
+
+			// 	// reset
+			// 	st.hasCurrentTs                = false;
+			// 	st.currentFrameIsKey           = false;
+			// 	st.currentFrameFirstPacketSeen = false;
+			// 	st.currentFrameFirstTid        = 3;
+			// 	st.frameTidSeen                = { 0, 0, 0, 0 };
+			// };
+
+			// auto& dbgSt           = dbgBySsrc[dbgSsrc];
+			// dbgSt.lastEncodingIdx = dbgEncodingIdx;
+
+			// // timestamp 기반 새 frame 시작
+			// if (!dbgSt.hasCurrentTs)
+			// {
+			// 	dbgSt.hasCurrentTs = true;
+			// 	dbgSt.currentTs    = dbgTs;
+
+			// 	// frame 첫 패킷에서만 keyframe 판정 기록
+			// 	dbgSt.currentFrameFirstPacketSeen = true;
+			// 	dbgSt.currentFrameFirstTid        = dbgTid;
+			// 	dbgSt.currentFrameIsKey           = packet->IsKeyFrame();
+			// }
+			// else if (dbgSt.currentTs != dbgTs)
+			// {
+			// 	finalizeFrame(dbgSt);
+
+			// 	dbgSt.hasCurrentTs = true;
+			// 	dbgSt.currentTs    = dbgTs;
+
+			// 	// 새 frame의 첫 패킷
+			// 	dbgSt.currentFrameFirstPacketSeen = true;
+			// 	dbgSt.currentFrameFirstTid        = dbgTid;
+			// 	dbgSt.currentFrameIsKey           = packet->IsKeyFrame();
+			// }
+
+			// // 현재 frame에 패킷 반영
+			// dbgSt.frameTidSeen[dbgTid]++;
+			// dbgSt.tidPkts[dbgTid]++;
+
+			// // 1초마다 출력
+			// if (dbgNowMs - dbgWindowStartMs >= 1000)
+			// {
+			// 	auto targetLayers = this->GetTargetLayers();
+
+			// 	// current layers 관련 API가 build마다 다를 수 있어서
+			// 	// 아래 두 줄은 환경에 맞게 맞추세요.
+			// 	auto currentLayers = this->encodingContext->GetCurrentLayers();
+
+			// 	uint32_t totalFrames    = 0;
+			// 	uint32_t totalKeyFrames = 0;
+			// 	std::array<uint32_t, 4> totalTidFrames{ 0, 0, 0, 0 };
+			// 	std::array<uint32_t, 4> totalTidPkts{ 0, 0, 0, 0 };
+
+			// 	for (auto& kv : dbgBySsrc)
+			// 	{
+			// 		const uint32_t logSsrc = kv.first;
+			// 		auto& logSt            = kv.second;
+
+			// 		// 아직 열려 있는 마지막 frame도 포함
+			// 		finalizeFrame(logSt);
+
+			// 		totalFrames += logSt.frames;
+			// 		totalKeyFrames += logSt.keyFrames;
+
+			// 		for (size_t i = 0; i < 4; ++i)
+			// 		{
+			// 			totalTidFrames[i] += logSt.tidFrames[i];
+			// 			totalTidPkts[i] += logSt.tidPkts[i];
+			// 		}
+
+			// 		MS_ERROR_STD(
+			// 		  "[CONSUMER_STAT] consumerId=%s"
+			// 		  //" ssrc=%" PRIu32
+			// 		  " encIdx=%d"
+			// 		  " targetSpatial=%d targetTemporal=%d"
+			// 		  " currentSpatial=%d currentTemporal=%d"
+			// 		  " frames=%" PRIu32
+			// 		  "/s"
+			// 		  " keyFrames=%" PRIu32
+			// 		  "/s"
+			// 		  " tid_frames=[0:%" PRIu32 ",1:%" PRIu32 ",2:%" PRIu32 ",unk:%" PRIu32
+			// 		  "]"
+			// 		  " tid_pkts=[0:%" PRIu32 ",1:%" PRIu32 ",2:%" PRIu32 ",unk:%" PRIu32 "]",
+			// 		  this->id.c_str(),
+			// 		  logSsrc,
+			// 		  logSt.lastEncodingIdx,
+			// 		  static_cast<int>(targetLayers.spatial),
+			// 		  static_cast<int>(targetLayers.temporal),
+			// 		  static_cast<int>(currentLayers.spatial),
+			// 		  static_cast<int>(currentLayers.temporal),
+			// 		  logSt.frames,
+			// 		  logSt.keyFrames,
+			// 		  logSt.tidFrames[0],
+			// 		  logSt.tidFrames[1],
+			// 		  logSt.tidFrames[2],
+			// 		  logSt.tidFrames[3],
+			// 		  logSt.tidPkts[0],
+			// 		  logSt.tidPkts[1],
+			// 		  logSt.tidPkts[2],
+			// 		  logSt.tidPkts[3]);
+			// 	}
+
+			// 	MS_ERROR_STD(
+			// 	  "[CONSUMER_LAYER_FPS_TOTAL] consumerId=%s"
+			// 	  " targetSpatial=%d targetTemporal=%d"
+			// 	  " currentSpatial=%d currentTemporal=%d"
+			// 	  " totalFrames=%" PRIu32
+			// 	  "/s"
+			// 	  " totalKeyFrames=%" PRIu32
+			// 	  "/s"
+			// 	  " totalTidFrames=[0:%" PRIu32 ",1:%" PRIu32 ",2:%" PRIu32 ",unk:%" PRIu32
+			// 	  "]"
+			// 	  " totalTidPkts=[0:%" PRIu32 ",1:%" PRIu32 ",2:%" PRIu32 ",unk:%" PRIu32 "]",
+			// 	  this->id.c_str(),
+			// 	  static_cast<int>(targetLayers.spatial),
+			// 	  static_cast<int>(targetLayers.temporal),
+			// 	  static_cast<int>(currentLayers.spatial),
+			// 	  static_cast<int>(currentLayers.temporal),
+			// 	  totalFrames,
+			// 	  totalKeyFrames,
+			// 	  totalTidFrames[0],
+			// 	  totalTidFrames[1],
+			// 	  totalTidFrames[2],
+			// 	  totalTidFrames[3],
+			// 	  totalTidPkts[0],
+			// 	  totalTidPkts[1],
+			// 	  totalTidPkts[2],
+			// 	  totalTidPkts[3]);
+
+			// 	dbgBySsrc.clear();
+			// 	dbgWindowStartMs = dbgNowMs;
+			// }
+			// ===== END DEBUG =====
+
+			//===== END: 1초 요약 로그 =====
 			// Send the packet.
 			this->listener->OnConsumerSendRtpPacket(this, packet);
 
@@ -1335,7 +1833,7 @@ namespace RTC
 	void SimulcastConsumer::ReceiveRtcpReceiverReport(RTC::RTCP::ReceiverReport* report)
 	{
 		MS_TRACE();
-		//MS_ERROR_STD("");
+		// MS_ERROR_STD("");
 		this->rtpStream->ReceiveRtcpReceiverReport(report);
 	}
 
@@ -1688,6 +2186,41 @@ namespace RTC
 	{
 		MS_TRACE();
 
+		// yeon: ===== Experiment: force spatial layer =====
+		// if (forceSpatialLayerEnabled )
+		// {
+		// 	if (
+		// 	  forcedSpatialLayer >= 0 &&
+		// 	  static_cast<size_t>(forcedSpatialLayer) < this->producerRtpStreams.size() &&
+		// 	  this->producerRtpStreams[forcedSpatialLayer] != nullptr)
+		// 	{
+		// 		if (newTargetSpatialLayer != forcedSpatialLayer || newTargetTemporalLayer != forcedTemporalLayer)
+		// 		{
+		// 			MS_WARN_TAG(
+		// 			  simulcast,
+		// 			  "[LAYER-EXP] force target layer %" PRIi16 ":%" PRIi16 " instead of %" PRIi16 ":%" PRIi16
+		// 			  " [consumerId:%s]",
+		// 			  forcedSpatialLayer,
+		// 			  forcedTemporalLayer,
+		// 			  newTargetSpatialLayer,
+		// 			  newTargetTemporalLayer,
+		// 			  this->id.c_str());
+		// 		}
+
+		// 		newTargetSpatialLayer  = forcedSpatialLayer;
+		// 		newTargetTemporalLayer = forcedTemporalLayer;
+		// 	}
+		// 	else
+		// 	{
+		// 		MS_WARN_TAG(
+		// 		  simulcast,
+		// 		  "[LAYER-EXP] cannot force spatial layer %" PRIi16
+		// 		  " because producer RTP stream does not exist [consumerId:%s]",
+		// 		  forcedSpatialLayer,
+		// 		  this->id.c_str());
+		// 	}
+		// }
+
 		// If we don't have yet a RTP timestamp reference, set it now.
 		if (
 		  newTargetSpatialLayer != -1 && (this->tsReferenceSpatialLayer == -1 ||
@@ -1708,6 +2241,7 @@ namespace RTC
 
 		if (newTargetSpatialLayer == -1)
 		{
+			MS_ERROR_STD("UpdateTargetLayers: -1");
 			// Unset current and target layers.
 			this->targetLayers.spatial  = -1;
 			this->targetLayers.temporal = -1;

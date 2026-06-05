@@ -227,6 +227,9 @@ namespace RTC
 			}
 		}
 
+		//yeon: 여기서 로스 여부를 전달
+		this->listener->OnPacketLossCheck(static_cast<double>(lostPackets) / expectedPackets);
+		
 		if (expectedPackets > 0)
 		{
 			this->UpdatePacketLoss(static_cast<double>(lostPackets) / expectedPackets);
@@ -528,14 +531,17 @@ namespace RTC
 		if (targetTransferRate.target_rate.bps() > std::numeric_limits<uint32_t>::max())
 		{
 			this->bitrates.availableBitrate = std::numeric_limits<uint32_t>::max();
+
+
 		}
 		else
 		{
 			this->bitrates.availableBitrate = static_cast<uint32_t>(targetTransferRate.target_rate.bps());
 		}
 
-		MS_DEBUG_DEV("new available bitrate:%" PRIu32, this->bitrates.availableBitrate);
 
+		MS_DEBUG_DEV("new available bitrate:%" PRIu32, this->bitrates.availableBitrate);
+		// 여기에서 이제 업데이트가 되면 그걸 반영해야 하는데, 그걸 이 함수 내에서 반영
 		MayEmitAvailableBitrateEvent(previousAvailableBitrate);
 	}
 

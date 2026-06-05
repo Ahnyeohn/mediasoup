@@ -78,6 +78,10 @@ enum Method: uint8 {
     RTPOBSERVER_RESUME,
     RTPOBSERVER_ADD_PRODUCER,
     RTPOBSERVER_REMOVE_PRODUCER,
+	CONSUMER_SET_RECV_DEADLINE, // yun
+    // yeon
+    CONSUMER_GET_SYNC_CLOCK,
+
 }
 
 union Body {
@@ -120,6 +124,9 @@ union Body {
     DataConsumer_RemoveSubchannelRequest: FBS.DataConsumer.RemoveSubchannelRequest,
     RtpObserver_AddProducerRequest: FBS.RtpObserver.AddProducerRequest,
     RtpObserver_RemoveProducerRequest: FBS.RtpObserver.RemoveProducerRequest,
+	Consumer_SetRecvDeadlineRequest: FBS.Consumer.SetRecvDeadlineRequest, // yun 
+    // yeon
+    Consumer_GetSyncClockRequest: FBS.Consumer.GetSyncClockRequest,
 }
 
 table Request {

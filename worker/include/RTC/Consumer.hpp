@@ -24,6 +24,15 @@ namespace RTC
 {
 	using namespace ConsumerTypes;
 
+	// yun
+	struct RecvDeadlineInfo
+	{
+		std::string producerId;
+		uint32_t rtpTimestamp{ 0u };
+		std::string latestDecodeTimeNtp;
+		double oneWayDelay{ 0.0 };
+	};
+
 	class Consumer : public Channel::ChannelSocket::RequestHandler
 	{
 	public:
@@ -75,6 +84,20 @@ namespace RTC
 		{
 			return this->kind;
 		}
+
+		static const char* MediaKindToString(RTC::Media::Kind kind)
+		{
+			switch (kind)
+			{
+				case RTC::Media::Kind::AUDIO:
+					return "audio";
+				case RTC::Media::Kind::VIDEO:
+					return "video";
+				default:
+					return "unknown";
+			}
+		}
+
 		const RTC::RtpParameters& GetRtpParameters() const
 		{
 			return this->rtpParameters;
@@ -94,6 +117,29 @@ namespace RTC
 
 			return layers;
 		}
+		virtual VideoLayers GetTargetLayers() const
+		{
+			// By default return 1:1.
+			VideoLayers layers;
+
+			return layers;
+		}
+
+		virtual int16_t GetCurrentSpatialLayer() const
+		{
+			return -1;
+		}
+
+		virtual int16_t GetTargetSpatialLayer() const
+		{
+			return -1;
+		}
+
+		virtual int16_t GetPreferredSpatialLayer() const
+		{
+			return -1;
+		}
+
 		const std::vector<uint32_t>& GetMediaSsrcs() const
 		{
 			return this->mediaSsrcs;
@@ -157,6 +203,7 @@ namespace RTC
 		/* Methods inherited from Channel::ChannelSocket::RequestHandler. */
 	public:
 		void HandleRequest(Channel::ChannelRequest* request) override;
+		double GetSyncClockMs() const;
 
 	protected:
 		void EmitTraceEventRtpAndKeyFrameTypes(RTC::RtpPacket* packet, bool isRtx = false) const;
@@ -205,6 +252,9 @@ namespace RTC
 		bool paused{ false };
 		bool producerPaused{ false };
 		bool producerClosed{ false };
+
+	private:
+		RecvDeadlineInfo recvDeadlineInfo;
 	};
 } // namespace RTC
 

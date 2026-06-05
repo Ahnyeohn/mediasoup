@@ -306,7 +306,7 @@ namespace RTC
 		  RTC::TransportCongestionControlClient* tccClient,
 		  RTC::RtpPacket* packet,
 		  const webrtc::PacedPacketInfo& pacingInfo) override;
-
+		void OnPacketLossCheck(double hasLoss) override;
 		/* Pure virtual methods inherited from RTC::TransportCongestionControlServer::Listener. */
 	public:
 		void OnTransportCongestionControlServerSendRtcpPacket(
@@ -328,6 +328,13 @@ namespace RTC
 	public:
 		// Passed by argument.
 		std::string id;
+
+	//yeon:
+	protected:
+		virtual void OnAvailableBitrateChanged(uint32_t bitrate) {}
+		virtual void OnPacketLossDetected(double loss) {}
+		virtual void OnRttUpdated(double rttMs) {}
+		virtual void OnSlack(const uint8_t* msg, size_t len) {}
 
 	protected:
 		RTC::Shared* shared{ nullptr };

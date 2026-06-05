@@ -85,6 +85,9 @@ namespace Channel
 		{ FBS::Request::Method::RTPOBSERVER_RESUME,                             "rtpObserver.resume"                         },
 		{ FBS::Request::Method::RTPOBSERVER_ADD_PRODUCER,                       "rtpObserver.addProducer"                    },
 		{ FBS::Request::Method::RTPOBSERVER_REMOVE_PRODUCER,                    "rtpObserver.removeProducer"                 },
+		{ FBS::Request::Method::CONSUMER_SET_RECV_DEADLINE,						"consumer.setRecvDeadline"					 }, // yun
+		// yeon
+		{ FBS::Request::Method::CONSUMER_GET_SYNC_CLOCK,    "consumer.getSyncClock"    }
 	};
 	// clang-format on
 

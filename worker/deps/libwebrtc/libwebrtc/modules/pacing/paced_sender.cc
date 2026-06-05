@@ -261,7 +261,8 @@ size_t PacedSender::PaddingBytesToAdd(
     return 0;
   }
 
-  return padding_budget_.bytes_remaining();
+  return padding_budget_.bytes_remaining(); // 데이터 보낼때, 그 양을 budget에 남은 양만큼만 보낸다.
+  
 }
 
 void PacedSender::OnPacketSent(size_t size) {

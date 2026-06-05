@@ -1832,7 +1832,8 @@ namespace RTC
 							break;
 						}
 					}
-
+					//yeon: 이 받은 RTT값을 WebRTCTransport에 전달
+					OnRttUpdated(rtt);
 					this->tccClient->ReceiveRtcpReceiverReport(rr, rtt, DepLibUV::GetTimeMsInt64());
 				}
 
@@ -2494,7 +2495,6 @@ namespace RTC
 		)
 		// clang-format on
 		{	
-			//MS_ERROR_STD("no");
 			this->transportWideCcSeq++;
 
 			webrtc::RtpPacketSendInfo packetInfo;
@@ -2568,6 +2568,11 @@ namespace RTC
 		else
 		{	
 			//MS_ERROR_STD("yes");
+
+			auto preferredLayers = consumer->GetPreferredLayers();
+			auto targetLayers = consumer->GetTargetLayers();
+			//MS_ERROR_STD("preferred Layer(video): %d", preferredLayers.temporal); // -1로 출력
+			//MS_ERROR_STD("target Layer(video): %d", targetLayers.temporal); // -1로 출력
 			SendRtpPacket(consumer, packet);
 		}
 
@@ -2590,6 +2595,7 @@ namespace RTC
 		)
 		// clang-format on
 		{
+			//MS_ERROR_STD("no2");
 			this->transportWideCcSeq++;
 
 			webrtc::RtpPacketSendInfo packetInfo;
@@ -2888,7 +2894,7 @@ namespace RTC
 	  RTC::SctpAssociation* /*sctpAssociation*/, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
-
+		//MS_ERROR_STD("OnSctpAssociationSendData");
 		// Ignore if destroying.
 		// NOTE: This is because when the child class (i.e. WebRtcTransport) is deleted,
 		// its destructor is called first and then the parent Transport's destructor,
@@ -2916,12 +2922,14 @@ namespace RTC
 		RTC::DataProducer* dataProducer = this->sctpListener.GetDataProducer(streamId);
 
 		if (!dataProducer)
-		{
-			MS_WARN_TAG(
-			  sctp, "no suitable DataProducer for received SCTP message [streamId:%" PRIu16 "]", streamId);
+		{	
+			//MS_WARN_TAG(sctp, "[TELEMETRY] raw SCTP payload streamId:%u ppid:%u payload:%.*s", streamId, ppid, static_cast<int>(len), reinterpret_cast<const char*>(msg));
+			OnSlack(msg, len);
+			// MS_WARN_TAG(
+			//   sctp, "no suitable DataProducer for received SCTP message [streamId:%" PRIu16 "]", streamId); // 여기가 실제로 호출된다.
 
 			return;
-		}
+		} // 여기서 그 메세지를 받는 부분을 명확히 찾아서 거기서 바로 리턴하도록 해야 한다. 후속 흐름으로 이어지지 않게 해야 함
 
 		// Pass the SCTP message to the corresponding DataProducer.
 		try
@@ -2964,12 +2972,23 @@ namespace RTC
 		MS_TRACE();
 
 		MS_DEBUG_DEV("outgoing available bitrate:%" PRIu32, bitrates.availableBitrate);
+		//MS_ERROR_STD("outgoing available bitrate:%" PRIu32, bitrates.availableBitrate);
 
 		DistributeAvailableOutgoingBitrate();
 		ComputeOutgoingDesiredBitrate();
 
 		// May emit 'trace' event.
 		EmitTraceEventBweType(bitrates);
+
+		//yeon: pacing 지표 수집
+		OnAvailableBitrateChanged(bitrates.availableBitrate);
+	}
+
+	inline void Transport::OnPacketLossCheck(double Loss)
+	{
+		MS_TRACE();
+		OnPacketLossDetected(Loss);
+
 	}
 
 	inline void Transport::OnTransportCongestionControlClientSendRtpPacket(
@@ -2989,7 +3008,8 @@ namespace RTC
 			packet->UpdateTransportWideCc01(this->transportWideCcSeq + 1)
 		)
 		// clang-format on
-		{
+		{	
+			//MS_ERROR_STD("no3");
 			this->transportWideCcSeq++;
 
 			// May emit 'trace' event.

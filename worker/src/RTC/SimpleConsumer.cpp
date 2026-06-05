@@ -13,6 +13,10 @@
 #endif
 #include <limits> // std::numeric_limits
 
+
+#include <array>
+#include <unordered_map>
+
 namespace RTC
 {
 	/* Static. */
@@ -316,7 +320,7 @@ namespace RTC
 	void SimpleConsumer::SendRtpPacket(RTC::RtpPacket* packet, RTC::SharedRtpPacket& sharedPacket)
 	{
 		MS_TRACE();
-		//MS_ERROR_STD();
+		// MS_ERROR_STD();
 #ifdef MS_RTC_LOGGER_RTP
 		packet->logger.consumerId = this->id;
 #endif
@@ -462,6 +466,125 @@ namespace RTC
 
 		if (result != RTC::RtpStreamSend::ReceivePacketResult::DISCARDED)
 		{
+			// ===== BEGIN: SimpleConsumer frame/keyframe 집계 (1초 요약) =====
+
+			// struct SimpleFrameAgg
+			// {
+			// 	uint32_t currentTs{ 0 };
+			// 	bool hasCurrentTs{ false };
+			// 	bool currentFrameIsKey{ false };
+
+			// 	uint32_t frames{ 0 };
+			// 	uint32_t keyFrames{ 0 };
+
+			// 	std::array<uint32_t, 4> tidPkts{ 0, 0, 0, 0 };      // 0,1,2,unk
+			// 	std::array<uint32_t, 4> tidFrames{ 0, 0, 0, 0 };    // 대표 TID
+			// 	std::array<uint32_t, 4> frameTidSeen{ 0, 0, 0, 0 }; // 현재 frame 내부 TID count
+			// };
+
+			// static uint64_t simpleDbgWindowStartMs{ 0 };
+			// static std::unordered_map<uint32_t, SimpleFrameAgg> simpleDbgBySsrc;
+
+			// const uint64_t simpleDbgNowMs = DepLibUV::GetTimeMs();
+			// if (simpleDbgWindowStartMs == 0)
+			// {
+			// 	simpleDbgWindowStartMs = simpleDbgNowMs;
+			// }
+
+			// const uint32_t simpleDbgSsrc = packet->GetSsrc();
+			// const uint32_t simpleDbgTs   = packet->GetTimestamp();
+
+			// int simpleDbgTid = static_cast<int>(packet->GetTemporalLayer());
+			// if (simpleDbgTid < 0 || simpleDbgTid > 2)
+			// {
+			// 	simpleDbgTid = 3; // unknown
+			// }
+
+			// auto finalizeSimpleFrame = [](SimpleFrameAgg& st)
+			// {
+			// 	if (!st.hasCurrentTs)
+			// 	{
+			// 		return;
+			// 	}
+
+			// 	st.frames++;
+			// 	if (st.currentFrameIsKey)
+			// 	{
+			// 		st.keyFrames++;
+			// 	}
+
+			// 	uint32_t bestIdx = 3;
+			// 	uint32_t bestVal = st.frameTidSeen[3];
+			// 	for (uint32_t i = 0; i < 3; ++i)
+			// 	{
+			// 		if (st.frameTidSeen[i] >= bestVal)
+			// 		{
+			// 			bestVal = st.frameTidSeen[i];
+			// 			bestIdx = i;
+			// 		}
+			// 	}
+
+			// 	st.tidFrames[bestIdx]++;
+
+			// 	st.hasCurrentTs      = false;
+			// 	st.currentFrameIsKey = false;
+			// 	st.frameTidSeen      = { 0, 0, 0, 0 };
+			// };
+
+			// auto& simpleDbgSt = simpleDbgBySsrc[simpleDbgSsrc];
+
+			// if (!simpleDbgSt.hasCurrentTs)
+			// {
+			// 	simpleDbgSt.hasCurrentTs = true;
+			// 	simpleDbgSt.currentTs    = simpleDbgTs;
+			// }
+			// else if (simpleDbgSt.currentTs != simpleDbgTs)
+			// {
+			// 	finalizeSimpleFrame(simpleDbgSt);
+			// 	simpleDbgSt.hasCurrentTs = true;
+			// 	simpleDbgSt.currentTs    = simpleDbgTs;
+			// }
+
+			// simpleDbgSt.frameTidSeen[simpleDbgTid]++;
+			// simpleDbgSt.tidPkts[simpleDbgTid]++;
+
+			// if (packet->IsKeyFrame())
+			// {
+			// 	simpleDbgSt.currentFrameIsKey = true;
+			// }
+
+			// if (simpleDbgNowMs - simpleDbgWindowStartMs >= 1000)
+			// {
+			// 	for (auto& kv : simpleDbgBySsrc)
+			// 	{
+			// 		const uint32_t logSsrc = kv.first;
+			// 		auto& logSt            = kv.second;
+
+			// 		finalizeSimpleFrame(logSt);
+
+			// 		MS_ERROR_STD(
+			// 		  "[SIMPLE_FRAME_SUMMARY] ssrc=%" PRIu32 " frames=%" PRIu32 "/s keyFrames=%" PRIu32
+			// 		  "/s"
+			// 		  " tid_frames=[0:%" PRIu32 ",1:%" PRIu32 ",2:%" PRIu32 ",unk:%" PRIu32
+			// 		  "]"
+			// 		  " tid_pkts=[0:%" PRIu32 ",1:%" PRIu32 ",2:%" PRIu32 ",unk:%" PRIu32 "]",
+			// 		  logSsrc,
+			// 		  logSt.frames,
+			// 		  logSt.keyFrames,
+			// 		  logSt.tidFrames[0],
+			// 		  logSt.tidFrames[1],
+			// 		  logSt.tidFrames[2],
+			// 		  logSt.tidFrames[3],
+			// 		  logSt.tidPkts[0],
+			// 		  logSt.tidPkts[1],
+			// 		  logSt.tidPkts[2],
+			// 		  logSt.tidPkts[3]);
+			// 	}
+
+			// 	simpleDbgBySsrc.clear();
+			// 	simpleDbgWindowStartMs = simpleDbgNowMs;
+			// }
+			// ===== END: SimpleConsumer frame/keyframe 집계 =====
 			// Send the packet.
 			this->listener->OnConsumerSendRtpPacket(this, packet);
 
@@ -640,7 +763,7 @@ namespace RTC
 	void SimpleConsumer::ReceiveRtcpReceiverReport(RTC::RTCP::ReceiverReport* report)
 	{
 		MS_TRACE();
-		//MS_ERROR_STD("");
+		// MS_ERROR_STD("");
 		this->rtpStream->ReceiveRtcpReceiverReport(report);
 	}
 

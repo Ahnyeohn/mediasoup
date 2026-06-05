@@ -37,6 +37,33 @@ namespace RTC
 
 			return layers;
 		}
+
+		VideoLayers GetTargetLayers() const override
+		{
+			VideoLayers layers;
+
+			layers.spatial  = this->targetLayers.spatial;
+			layers.temporal = this->targetLayers.temporal;
+
+			return layers;
+		}
+
+		// yeon: target layer에 webrtctransport가 접근하기 위한 수정사항 consumer.hpp의 함수를 오버라이드
+		int16_t GetCurrentSpatialLayer() const override
+		{
+			return this->currentSpatialLayer;
+		}
+
+		int16_t GetTargetSpatialLayer() const override
+		{
+			return this->targetLayers.spatial;
+		}
+
+		int16_t GetPreferredSpatialLayer() const override
+		{
+			return this->preferredLayers.spatial;
+		}
+
 		bool IsActive() const override
 		{
 			// clang-format off
