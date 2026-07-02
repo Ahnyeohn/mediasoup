@@ -2952,65 +2952,11 @@ namespace RTC
 		}
 	}
 
-	static FILE* g_videoSendLog{ nullptr };
-
 	static inline uint64_t NowUs()
 	{
 		return std::chrono::duration_cast<std::chrono::microseconds>(
 		         std::chrono::steady_clock::now().time_since_epoch())
 		  .count();
-	}
-
-	static void InitVideoSendLog()
-	{
-		if (!g_videoSendLog)
-		{
-			if (ispacingg == true)
-			{
-				g_videoSendLog = std::fopen("/home/n2sl/yeon/qos/network/log/video_send_log_pacing.csv", "a");
-			}
-			else if (ispacingg == false)
-			{
-				g_videoSendLog =
-				  std::fopen("/home/n2sl/yeon/qos/network/log/video_send_log_no_pacing.csv", "a");
-			}
-
-			if (g_videoSendLog)
-			{
-				std::fprintf(g_videoSendLog, "send_time_us,consumer_id,ssrc,seq,rtp_timestamp,marker,size\n");
-				std::fflush(g_videoSendLog);
-			}
-		}
-	}
-
-	static void LogVideoPacketSend(
-	  const std::string& consumerId,
-	  uint32_t ssrc,
-	  uint16_t seq,
-	  uint32_t rtpTimestamp,
-	  bool marker,
-	  size_t size)
-	{
-		if (!g_videoSendLog)
-		{
-			return;
-		}
-
-		const uint64_t nowUs = NowUs();
-
-		std::fprintf(
-		  g_videoSendLog,
-		  "%" PRIu64 ",%s,%" PRIu32 ",%" PRIu16 ",%" PRIu32 ",%d,%zu\n",
-		  nowUs,
-		  consumerId.c_str(),
-		  ssrc,
-		  seq,
-		  rtpTimestamp,
-		  marker ? 1 : 0,
-		  size);
-
-		// 너무 자주 fflush 하면 오버헤드가 크므로, 처음엔 실험용이면 해도 됨
-		std::fflush(g_videoSendLog);
 	}
 
 	void RTC::WebRtcTransport::SendRtpPacketNow(
@@ -3066,23 +3012,6 @@ namespace RTC
 
 		const uint8_t* data = packet->GetData();
 		auto len            = packet->GetSize();
-
-		// 비디오만
-		if (packetsendlog)
-		{
-			if (consumer && consumer->GetKind() == RTC::Media::Kind::VIDEO)
-			{
-				InitVideoSendLog();
-
-				LogVideoPacketSend(
-				  consumer->id,
-				  packet->GetSsrc(),
-				  packet->GetSequenceNumber(),
-				  packet->GetTimestamp(),
-				  packet->HasMarker(),
-				  packet->GetSize());
-			}
-		}
 
 		if (!this->srtpSendSession->EncryptRtp(&data, &len))
 		{
