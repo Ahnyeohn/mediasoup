@@ -56,6 +56,11 @@ namespace RTC
 			          << "frameBufferExtractTimeMs, "
 			          << "decodeQueueInsertTimeMs, "
 			          << "decodeQueueExtractTimeMs, "
+
+			          << "now, "
+			          << "render_time, "
+			          << "max_wait, "
+
 			          << "decodeStartMs, "
 			          << "decodeFinishMs, "
 			          << "desiredReceiveTimeMs, "
@@ -65,8 +70,8 @@ namespace RTC
 			          << "receiveSlackMs, "
 			          << "decodeSlackNominalMs, "
 			          // << "queueResidenceMs, "
-					  << "frameBufferResidenceMs, "
-					  << "decodeQueueResidenceMs, "
+			          << "frameBufferResidenceMs, "
+			          << "decodeQueueResidenceMs, "
 			          << "decodeSlackEffectiveMs, "
 			          << "pacing\n";
 			//  << "errorMs\n";
@@ -105,10 +110,12 @@ namespace RTC
 		  //   << static_cast<uint32_t>(record.temporalLayer) << ","
 
 		  //<< static_cast<uint32_t>(record.SpatialLayer) << ","
-		  << record.currentSpatialLayer << ", " << record.targetSpatialLayer << ", "
+		  << record.currentSpatialLayer << ", " 
+		  << record.targetSpatialLayer << ", "
 		  << record.preferredSpatialLayer << ", "
 
-		  << record.network.rttMs << ", " << record.network.lossRate << ", "
+		  << record.network.rttMs << ", " 
+		  << record.network.lossRate << ", "
 		  << record.network.availableBitratebps
 		  << ", "
 		  //   << record.network.aceQueueBytes << ", "
@@ -116,27 +123,29 @@ namespace RTC
 		  //  << predicted << ", "
 		  << (record.hasReceiveTimeMs ? std::to_string(record.receiveTimeMs) : "") << ", "
 		  << (record.hasLatestDecodeTimeMs ? std::to_string(record.latestDecodeTimeMs) : "") << ", "
-		  << (record.hasFrameBufferInsertTimeMs ? std::to_string(record.frameBufferInsertTimeMs) : "")
-		  << ", "
-		  << (record.hasFrameBufferExtractTimeMs ? std::to_string(record.frameBufferExtractTimeMs) : "")
-		  << ", "
-		  << (record.hasDecodeQueueInsertTimeMs ? std::to_string(record.decodeQueueInsertTimeMs) : "")
-		  << ", "
-		  << (record.hasDecodeQueueExtractTimeMs ? std::to_string(record.decodeQueueExtractTimeMs) : "")
-		  << ", " << (record.hasDecodeStartMs ? std::to_string(record.decodeStartMs) : "") << ", "
+		  << (record.hasFrameBufferInsertTimeMs ? std::to_string(record.frameBufferInsertTimeMs) : "") << ", "
+		  << (record.hasFrameBufferExtractTimeMs ? std::to_string(record.frameBufferExtractTimeMs) : "") << ", "
+		  << (record.hasDecodeQueueInsertTimeMs ? std::to_string(record.decodeQueueInsertTimeMs) : "") << ", "
+		  << (record.hasDecodeQueueExtractTimeMs ? std::to_string(record.decodeQueueExtractTimeMs) : "") << ", "
+
+		  << (record.hasnow ? std::to_string(record.now) : "") << ", "
+		  << (record.hasrender_time ? std::to_string(record.render_time) : "") << ", "
+		  << (record.hasmax_wait ? std::to_string(record.max_wait) : "") << ", "
+
+		  << (record.hasDecodeStartMs ? std::to_string(record.decodeStartMs) : "") << ", "
 		  << (record.hasDecodeFinishMs ? std::to_string(record.decodeFinishMs) : "") << ", "
 		  << (record.hasDesiredReceiveTimeMs ? std::to_string(record.desiredReceiveTimeMs) : "") << ", "
 		  << (record.hasDesiredDecodeStartMs ? std::to_string(record.desiredDecodeStartMs) : "") << ", "
 		  << actual << ", "
-		  << (record.hasActualSlackEffectiveMs ? std::to_string(record.actualSlackEffectiveMs) : "")
-		  << ", " << (record.hasReceiveSlackMs ? std::to_string(record.receiveSlackMs) : "") << ", "
+		  << (record.hasActualSlackEffectiveMs ? std::to_string(record.actualSlackEffectiveMs) : "") << ", " 
+		  << (record.hasReceiveSlackMs ? std::to_string(record.receiveSlackMs) : "") << ", "
 		  << (record.hasDecodeSlackNominalMs ? std::to_string(record.decodeSlackNominalMs) : "") << ", "
 		  //<< (record.hasQueueResidenceMs ? std::to_string(record.queueResidenceMs) : "") << ", "
 		  << (record.hasFrameBufferResidenceMs ? std::to_string(record.frameBufferResidenceMs) : "") << ", "
 		  << (record.hasDecodeQueueResidenceMs ? std::to_string(record.decodeQueueResidenceMs) : "") << ", "
 
-		  << (record.hasDecodeSlackEffectiveMs ? std::to_string(record.decodeSlackEffectiveMs) : "")
-		  << ", " << record.pacingEnabled << "\n";
+		  << (record.hasDecodeSlackEffectiveMs ? std::to_string(record.decodeSlackEffectiveMs) : "") << ", " 
+		  << record.pacingEnabled << "\n";
 
 		//  << error << "\n";
 

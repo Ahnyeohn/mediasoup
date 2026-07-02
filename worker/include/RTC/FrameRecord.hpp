@@ -11,6 +11,11 @@
 
 namespace RTC
 {
+	struct PacketReceiveInfo
+	{
+		uint16_t sequenceNumber{ 0 };
+		uint64_t receiveTimeMs{ 0 };
+	};
 	struct FrameRecord
 	{
 		uint32_t frameId{ 0 }; // 추천: RTP timestamp 사용
@@ -67,7 +72,7 @@ namespace RTC
 
 		// === 새 telemetry ===
 		bool hasLatestDecodeTimeMs{ false };
-		uint64_t latestDecodeTimeMs{ 0 };
+		int64_t latestDecodeTimeMs{ 0 };
 
 		bool hasFrameBufferInsertTimeMs{ false };
 		uint64_t frameBufferInsertTimeMs{ 0 };
@@ -99,6 +104,20 @@ namespace RTC
 
 		bool hasActualSlackEffectiveMs{ false };
 		double actualSlackEffectiveMs{ 0.0 };
+
+		// 패킷 수신 정보를 넣기 위해 추가함
+		bool hasPacketReceiveTimes{ false };
+		std::vector<PacketReceiveInfo> packetReceiveTimes;
+
+		// === 추가: 브라우저 timing 내부 계산값 ===
+		bool hasnow{ false };
+		int64_t  now{ 0 };
+
+		bool hasrender_time{ false };
+		int64_t  render_time{ 0 };
+
+		bool hasmax_wait{ false };
+		int64_t  max_wait{ 0 };
 	};
 
 	struct FrameBuilder
@@ -124,6 +143,9 @@ namespace RTC
 		bool hasValidTemporalLayer{ false };
 
 		bool pacingEnabled{ false };
+
+		bool hasPacketReceiveTimes{ false };
+		std::vector<PacketReceiveInfo> packetReceiveTimes;
 	};
 
 	class FrameRecordTable
@@ -158,13 +180,19 @@ namespace RTC
 		bool AttachTimingAndDesiredTimes(
 		  uint32_t frameId,
 		  double receiveTimeMs,
-		  double latestDecodeTimeMs,
+		  int64_t latestDecodeTimeMs,
 		  double frameBufferInsertTimeMs,
 		  double frameBufferExtractTimeMs,
 		  double decodeQueueInsertTimeMs,
 		  double decodeQueueExtractTimeMs,
 		  double decodeStartMs,
-		  double decodeFinishMs);
+		  double decodeFinishMs,
+		  int64_t  now,
+		  int64_t  render_time,
+		  int64_t  max_wait);
+
+		bool AttachPacketReceiveTimes(
+		  uint32_t frameId, const std::vector<PacketReceiveInfo>& packetReceiveTimes);
 
 		// 학습용으로 추출할 completed record 조회.
 		std::optional<FrameRecord> GetCompletedRecord(uint32_t frameId) const;

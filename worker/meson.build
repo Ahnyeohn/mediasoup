@@ -143,6 +143,7 @@ common_sources = [
   'src/RTC/FrameRecord.cpp',
   'src/RTC/SlackPredictor.cpp',
   'src/RTC/FrameRecordCsvWriter.cpp',
+  'src/RTC/FramePacketCsvWriter.cpp',
   'src/RTC/Codecs/H264.cpp',
   'src/RTC/Codecs/VP8.cpp',
   'src/RTC/Codecs/VP9.cpp',

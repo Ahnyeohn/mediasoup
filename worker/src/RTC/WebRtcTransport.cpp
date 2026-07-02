@@ -42,6 +42,8 @@
 // yeon: ispacing을 런타임에 바꾸기 위함
 #include <atomic>
 
+#include <memory>
+
 // ===== pacing 여부 ====
 // static bool ispacing = false;
 static bool ispacingg = false;
@@ -174,6 +176,35 @@ static bool ExtractJsonUint32(const std::string& text, const std::string& key, u
 	return true;
 }
 
+static bool ExtractJsonInt64(const std::string& text, const std::string& key, int64_t& out)
+{
+	const std::string needle = "\"" + key + "\"";
+	size_t pos               = text.find(needle);
+
+	if (pos == std::string::npos)
+	{
+		return false;
+	}
+
+	pos = text.find(':', pos);
+	if (pos == std::string::npos)
+	{
+		return false;
+	}
+
+	char* endPtr      = nullptr;
+	const char* start = text.c_str() + pos + 1;
+	long long value   = std::strtoll(start, &endPtr, 10);
+
+	if (start == endPtr)
+	{
+		return false;
+	}
+
+	out = static_cast<int64_t>(value);
+	return true;
+}
+
 static bool ExtractJsonUint64(const std::string& text, const std::string& key, uint64_t& out)
 {
 	const std::string needle = "\"" + key + "\"";
@@ -229,6 +260,133 @@ static bool ExtractJsonDouble(const std::string& text, const std::string& key, d
 	}
 
 	out = value;
+	return true;
+}
+
+static bool ExtractLatestDecodeTimingBundle(
+  const std::string& text,
+  int64_t& latestDecodeTimeMs,
+  int64_t& now,
+  int64_t& render_time,
+  int64_t& max_wait)
+{
+	latestDecodeTimeMs = 0;
+	now                = 0;
+	render_time        = 0;
+	max_wait           = 0;
+
+	const std::string key = "\"latestDecodeTimeMs\"";
+	size_t keyPos         = text.find(key);
+	if (keyPos == std::string::npos)
+	{
+		return false;
+	}
+
+	size_t arrayStart = text.find('[', keyPos);
+	if (arrayStart == std::string::npos)
+	{
+		return false;
+	}
+
+	size_t arrayEnd = text.find(']', arrayStart);
+	if (arrayEnd == std::string::npos)
+	{
+		return false;
+	}
+
+	// 빈 배열 [] 허용
+	size_t objStart = text.find('{', arrayStart);
+	if (objStart == std::string::npos || objStart > arrayEnd)
+	{
+		return true;
+	}
+
+	size_t objEnd = text.find('}', objStart);
+	if (objEnd == std::string::npos || objEnd > arrayEnd)
+	{
+		return false;
+	}
+
+	const std::string objText = text.substr(objStart, objEnd - objStart + 1);
+
+	if (!ExtractJsonInt64(objText, "latest_decode_time", latestDecodeTimeMs))
+	{
+		return false;
+	}
+
+	if (!ExtractJsonInt64(objText, "now", now))
+	{
+		return false;
+	}
+
+	if (!ExtractJsonInt64(objText, "render_time", render_time))
+	{
+		return false;
+	}
+
+	if (!ExtractJsonInt64(objText, "max_wait", max_wait))
+	{
+		return false;
+	}
+
+	return true;
+}
+
+static bool ExtractPacketReceiveTimes(const std::string& text, std::vector<RTC::PacketReceiveInfo>& out)
+{
+	out.clear();
+
+	const std::string key = "\"packetReceiveTimes\"";
+	size_t keyPos         = text.find(key);
+	if (keyPos == std::string::npos)
+	{
+		return false;
+	}
+
+	size_t arrayStart = text.find('[', keyPos);
+	if (arrayStart == std::string::npos)
+	{
+		return false;
+	}
+
+	size_t arrayEnd = text.find(']', arrayStart);
+	if (arrayEnd == std::string::npos || arrayEnd <= arrayStart)
+	{
+		return false;
+	}
+
+	size_t pos = arrayStart + 1;
+
+	while (pos < arrayEnd)
+	{
+		size_t objStart = text.find('{', pos);
+		if (objStart == std::string::npos || objStart >= arrayEnd)
+		{
+			break;
+		}
+
+		size_t objEnd = text.find('}', objStart);
+		if (objEnd == std::string::npos || objEnd > arrayEnd)
+		{
+			return false;
+		}
+
+		const std::string objText = text.substr(objStart, objEnd - objStart + 1);
+
+		uint64_t seq64{ 0 };
+		uint64_t recvMs{ 0 };
+
+		if (ExtractJsonUint64(objText, "sequenceNumber", seq64) && ExtractJsonUint64(objText, "receiveTimeMs", recvMs))
+		{
+			RTC::PacketReceiveInfo info;
+			info.sequenceNumber = static_cast<uint16_t>(seq64);
+			info.receiveTimeMs  = recvMs;
+			out.emplace_back(info);
+		}
+
+		pos = objEnd + 1;
+	}
+
 	return true;
 }
 
@@ -858,6 +1016,14 @@ namespace RTC
 {
 	/* Static. */
 
+	static std::shared_ptr<RTC::FrameRecordTable> GetSharedFrameRecordTable()
+	{
+		static std::shared_ptr<RTC::FrameRecordTable> sharedFrameRecordTable =
+		  std::make_shared<RTC::FrameRecordTable>(5000);
+
+		return sharedFrameRecordTable;
+	}
+
 	static constexpr uint16_t IceCandidateDefaultLocalPriority{ 10000 };
 	// We just provide "host" candidates so type preference is fixed.
 	static constexpr uint16_t IceTypePreference{ 64 };
@@ -1028,7 +1194,7 @@ namespace RTC
 		if (this->predictedQueueBytes > this->queueThresholdBytes) // queue 사이즈가 12000을 초과하면 그
 		                                                           // 초과량만큼 감소시킨다.
 		{
-			// MS_ERROR_STD("감소");
+			MS_ERROR_STD("감소");
 			B -=
 			  (this->predictedQueueBytes - this->queueThresholdBytes); // 네트워크 큐에 있는 바이트 수
 			                                                           // = 논문은 패킷 수 사용하여 적정값
@@ -1493,6 +1659,12 @@ namespace RTC
 	{
 		MS_TRACE();
 		// MS_ERROR_STD("OnSlack");
+		// MS_WARN_TAG(
+		//   sctp,
+		//   "[SLACK] transportId:%s raw telemetry payload len:%zu text:%s",
+		//   this->id.c_str(),
+		//   len,
+		//   text.c_str());
 
 		if (!msg || len == 0)
 		{
@@ -1502,6 +1674,8 @@ namespace RTC
 
 		// msg는 null-terminated가 아닐 수 있으므로 len 기반으로 문자열 생성
 		const std::string text(reinterpret_cast<const char*>(msg), len);
+
+		//MS_WARN_TAG(sctp, "[SLACK] raw telemetry payload len:%zu text:%s", len, text.c_str());
 
 		std::string type;
 		if (!ExtractJsonString(text, "type", type))
@@ -1524,11 +1698,17 @@ namespace RTC
 		uint64_t decodeFinishMs{ 0 };
 
 		// effective slack
-		uint64_t latestDecodeTimeMs{ 0 };
+		int64_t latestDecodeTimeMs{ 0 };
 		uint64_t frameBufferInsertTimeMs{ 0 };
 		uint64_t frameBufferExtractTimeMs{ 0 };
 		uint64_t decodeQueueInsertTimeMs{ 0 };
 		uint64_t decodeQueueExtractTimeMs{ 0 };
+
+		std::vector<RTC::PacketReceiveInfo> packetReceiveTimes;
+
+		int64_t now{ 0 };
+		int64_t render_time{ 0 };
+		int64_t max_wait{ 0 };
 
 		if (!ExtractJsonUint64(text, "rtpTimestamp", rtpTimestamp64))
 		{
@@ -1555,11 +1735,19 @@ namespace RTC
 			return;
 		}
 
-		if (!ExtractJsonUint64(text, "latestDecodeTimeMs", latestDecodeTimeMs))
+		if (!ExtractLatestDecodeTimingBundle(text, latestDecodeTimeMs, now, render_time, max_wait))
 		{
-			MS_WARN_TAG(sctp, "[SLACK] failed to parse latestDecodeTimeMs payload:%s", text.c_str());
+			MS_WARN_TAG(sctp, "[SLACK] failed to parse latestDecodeTimeMs bundle payload:%s", text.c_str());
 			return;
 		}
+
+		// MS_WARN_TAG(
+		//   sctp,
+		//   "[SLACK] decode timing bundle frameId:%" PRIu64 " latestDecodeTimeMs:%" PRId64 " now:%"
+		//   PRId64 " render_time:%" PRId64 " max_wait:%" PRId64, rtpTimestamp64, latestDecodeTimeMs,
+		//   now,
+		//   render_time,
+		//   max_wait);
 
 		if (!ExtractJsonUint64(text, "frameBufferInsertTimeMs", frameBufferInsertTimeMs))
 		{
@@ -1585,21 +1773,26 @@ namespace RTC
 			return;
 		}
 
+		if (!ExtractPacketReceiveTimes(text, packetReceiveTimes))
+		{
+			MS_WARN_TAG(sctp, "[SLACK] failed to parse packetReceiveTimes payload:%s", text.c_str());
+			packetReceiveTimes.clear();
+		}
+
 		// 현재 frameId는 RTP timestamp를 사용 중
 		const uint32_t frameId = static_cast<uint32_t>(rtpTimestamp64);
 
 		// slack = latestDecodeTimeUs - receiveTimeUs
-		if (decodeStartMs < receiveTimeMs)
-		{
-			MS_WARN_TAG(
-			  sctp,
-			  "[SLACK] invalid telemetry: decodeStartMs(%" PRIu64 ") < receiveTimeMs(%" PRIu64
-			  ") frameId:%" PRIu32,
-			  decodeStartMs,
-			  receiveTimeMs,
-			  frameId);
-			return;
-		}
+		// if (decodeStartMs < receiveTimeMs)
+		// {
+		// 	MS_WARN_TAG(
+		// 	  sctp,
+		// 	  "[SLACK] invalid telemetry: decodeStartMs(%" PRIu64 ") < receiveTimeMs(%" PRIu64
+		// 	  ") frameId:%" PRIu32,
+		// 	  decodeStartMs,
+		// 	  receiveTimeMs,
+		// 	  frameId);
+		// }
 
 		const double slackMs          = static_cast<double>(decodeStartMs - receiveTimeMs);
 		const double decoding_latency = static_cast<double>(decodeFinishMs - decodeStartMs);
@@ -1618,7 +1811,12 @@ namespace RTC
 			  decodeQueueInsertTimeMs,
 			  decodeQueueExtractTimeMs,
 			  decodeStartMs,
-			  decodeFinishMs);
+			  decodeFinishMs,
+			  now,
+			  render_time,
+			  max_wait);
+			this->frameRecordTable->AttachPacketReceiveTimes(frameId, packetReceiveTimes);
+
 			attached = this->frameRecordTable->AttachSlack(frameId, slackMs);
 		}
 
@@ -1660,6 +1858,10 @@ namespace RTC
 				if (rec.hasReceiveTimeMs && rec.hasDesiredReceiveTimeMs && rec.hasReceiveSlackMs && this->frameRecordCsvWriter)
 				{
 					this->frameRecordCsvWriter->WriteRecord(rec);
+				}
+				if (this->framePacketCsvWriter && !packetReceiveTimes.empty())
+				{
+					this->framePacketCsvWriter->WritePacketReceiveTimes(frameId, packetReceiveTimes);
 				}
 			}
 		}
@@ -1943,7 +2145,8 @@ namespace RTC
 
 		// yeon: deadline slack
 		this->networkState     = std::make_unique<RTC::NetworkState>();
-		this->frameRecordTable = std::make_unique<RTC::FrameRecordTable>(5000); // 5000개만 저장하기
+		//this->frameRecordTable = std::make_unique<RTC::FrameRecordTable>(5000); // 5000개만 저장하기
+		this->frameRecordTable = GetSharedFrameRecordTable();
 		this->slackPredictor   = std::make_unique<RTC::SlackPredictor>();
 
 		if (ispacingg)
@@ -1956,6 +2159,9 @@ namespace RTC
 			this->frameRecordCsvWriter = std::make_unique<RTC::FrameRecordCsvWriter>(
 			  "/home/n2sl/yeon/qos/network/log/frame/frame_records.csv");
 		}
+
+		this->framePacketCsvWriter = std::make_unique<RTC::FramePacketCsvWriter>(
+		  "/home/n2sl/yeon/qos/network/log/frame/frame_packets.csv");
 
 		try
 		{

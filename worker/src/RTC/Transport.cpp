@@ -30,6 +30,32 @@
 #include <iterator>                                              // std::ostream_iterator
 #include <map>                                                   // std::multimap
 
+static bool ContainsBytes(const uint8_t* data, size_t len, const char* needle)
+{
+	const size_t needleLen = std::strlen(needle);
+
+	if (!data || needleLen == 0 || len < needleLen)
+	{
+		return false;
+	}
+
+	for (size_t i = 0; i <= len - needleLen; ++i)
+	{
+		if (std::memcmp(data + i, needle, needleLen) == 0)
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static bool LooksLikeFrameTelemetryPayload(const uint8_t* msg, size_t len, uint32_t /*ppid*/)
+{
+	return ContainsBytes(msg, len, "frameId") || ContainsBytes(msg, len, "rtpTimestamp") ||
+	       ContainsBytes(msg, len, "decode") || ContainsBytes(msg, len, "slack");
+}
+
 namespace RTC
 {
 	static const size_t DefaultSctpSendBufferSize{ 262144 }; // 2^18.
@@ -61,8 +87,9 @@ namespace RTC
 			}
 		}
 
-		if (auto initialAvailableOutgoingBitrate = options->initialAvailableOutgoingBitrate();
-		    initialAvailableOutgoingBitrate.has_value())
+		if (
+		  auto initialAvailableOutgoingBitrate = options->initialAvailableOutgoingBitrate();
+		  initialAvailableOutgoingBitrate.has_value())
 		{
 			this->initialAvailableOutgoingBitrate = initialAvailableOutgoingBitrate.value();
 		}
@@ -1558,7 +1585,7 @@ namespace RTC
 	void Transport::ReceiveRtpPacket(RTC::RtpPacket* packet)
 	{
 		MS_TRACE();
-		
+
 #ifdef MS_RTC_LOGGER_RTP
 		packet->logger.recvTransportId = this->id;
 #endif
@@ -1832,7 +1859,7 @@ namespace RTC
 							break;
 						}
 					}
-					//yeon: 이 받은 RTT값을 WebRTCTransport에 전달
+					// yeon: 이 받은 RTT값을 WebRTCTransport에 전달
 					OnRttUpdated(rtt);
 					this->tccClient->ReceiveRtcpReceiverReport(rr, rtt, DepLibUV::GetTimeMsInt64());
 				}
@@ -2453,14 +2480,14 @@ namespace RTC
 	inline void Transport::OnProducerRtpPacketReceived(RTC::Producer* producer, RTC::RtpPacket* packet)
 	{
 		MS_TRACE();
-		//MS_ERROR_STD();
+		// MS_ERROR_STD();
 		this->listener->OnTransportProducerRtpPacketReceived(this, producer, packet);
 	}
 
 	inline void Transport::OnProducerSendRtcpPacket(RTC::Producer* /*producer*/, RTC::RTCP::Packet* packet)
 	{
 		MS_TRACE();
-		
+
 		SendRtcpPacket(packet);
 	}
 
@@ -2476,7 +2503,7 @@ namespace RTC
 	inline void Transport::OnConsumerSendRtpPacket(RTC::Consumer* consumer, RTC::RtpPacket* packet)
 	{
 		MS_TRACE();
-		//MS_ERROR_STD();
+		// MS_ERROR_STD();
 
 #ifdef MS_RTC_LOGGER_RTP
 		packet->logger.sendTransportId = this->id;
@@ -2494,7 +2521,7 @@ namespace RTC
 			packet->UpdateTransportWideCc01(this->transportWideCcSeq + 1)
 		)
 		// clang-format on
-		{	
+		{
 			this->transportWideCcSeq++;
 
 			webrtc::RtpPacketSendInfo packetInfo;
@@ -2566,13 +2593,13 @@ namespace RTC
 #endif
 		}
 		else
-		{	
-			//MS_ERROR_STD("yes");
+		{
+			// MS_ERROR_STD("yes");
 
 			auto preferredLayers = consumer->GetPreferredLayers();
-			auto targetLayers = consumer->GetTargetLayers();
-			//MS_ERROR_STD("preferred Layer(video): %d", preferredLayers.temporal); // -1로 출력
-			//MS_ERROR_STD("target Layer(video): %d", targetLayers.temporal); // -1로 출력
+			auto targetLayers    = consumer->GetTargetLayers();
+			// MS_ERROR_STD("preferred Layer(video): %d", preferredLayers.temporal); // -1로 출력
+			// MS_ERROR_STD("target Layer(video): %d", targetLayers.temporal); // -1로 출력
 			SendRtpPacket(consumer, packet);
 		}
 
@@ -2595,7 +2622,7 @@ namespace RTC
 		)
 		// clang-format on
 		{
-			//MS_ERROR_STD("no2");
+			// MS_ERROR_STD("no2");
 			this->transportWideCcSeq++;
 
 			webrtc::RtpPacketSendInfo packetInfo;
@@ -2894,11 +2921,11 @@ namespace RTC
 	  RTC::SctpAssociation* /*sctpAssociation*/, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
-		//MS_ERROR_STD("OnSctpAssociationSendData");
-		// Ignore if destroying.
-		// NOTE: This is because when the child class (i.e. WebRtcTransport) is deleted,
-		// its destructor is called first and then the parent Transport's destructor,
-		// and we would end here calling SendSctpData() which is an abstract method.
+		// MS_ERROR_STD("OnSctpAssociationSendData");
+		//  Ignore if destroying.
+		//  NOTE: This is because when the child class (i.e. WebRtcTransport) is deleted,
+		//  its destructor is called first and then the parent Transport's destructor,
+		//  and we would end here calling SendSctpData() which is an abstract method.
 		if (this->destroying)
 		{
 			return;
@@ -2918,18 +2945,36 @@ namespace RTC
 	  uint32_t ppid)
 	{
 		MS_TRACE();
-
+		//MS_ERROR_STD("OnSctpAssociationMessageReceived");
 		RTC::DataProducer* dataProducer = this->sctpListener.GetDataProducer(streamId);
 
-		if (!dataProducer)
-		{	
-			//MS_WARN_TAG(sctp, "[TELEMETRY] raw SCTP payload streamId:%u ppid:%u payload:%.*s", streamId, ppid, static_cast<int>(len), reinterpret_cast<const char*>(msg));
-			OnSlack(msg, len);
+		// 1. 구/신버전 정상 DataProducer 경로.
+		if (LooksLikeFrameTelemetryPayload(msg, len, ppid))
+		{
 			// MS_WARN_TAG(
-			//   sctp, "no suitable DataProducer for received SCTP message [streamId:%" PRIu16 "]", streamId); // 여기가 실제로 호출된다.
+			//   sctp,
+			//   "[TELEMETRY] frame telemetry payload captured [streamId:%" PRIu16 ", ppid:%" PRIu32
+			//   ", len:%zu, hasDataProducer:%d]",
+			//   streamId,
+			//   ppid,
+			//   len,
+			//   dataProducer ? 1 : 0);
+
+			OnSlack(msg, len);
+
+			// telemetry를 Node.js app 쪽 DataProducer event로도 넘길 필요가 없다면 return.
+			// CSV/수집만 목적이면 return이 맞습니다.
+			return;
+		}
+
+		// 2. 구버전 raw/unregistered SCTP 경로.
+		if (!dataProducer)
+		{
+			MS_WARN_TAG(
+			  sctp, "no suitable DataProducer for received SCTP message [streamId:%" PRIu16 "]", streamId);
 
 			return;
-		} // 여기서 그 메세지를 받는 부분을 명확히 찾아서 거기서 바로 리턴하도록 해야 한다. 후속 흐름으로 이어지지 않게 해야 함
+		}
 
 		// Pass the SCTP message to the corresponding DataProducer.
 		try
@@ -2972,7 +3017,7 @@ namespace RTC
 		MS_TRACE();
 
 		MS_DEBUG_DEV("outgoing available bitrate:%" PRIu32, bitrates.availableBitrate);
-		//MS_ERROR_STD("outgoing available bitrate:%" PRIu32, bitrates.availableBitrate);
+		// MS_ERROR_STD("outgoing available bitrate:%" PRIu32, bitrates.availableBitrate);
 
 		DistributeAvailableOutgoingBitrate();
 		ComputeOutgoingDesiredBitrate();
@@ -2980,7 +3025,7 @@ namespace RTC
 		// May emit 'trace' event.
 		EmitTraceEventBweType(bitrates);
 
-		//yeon: pacing 지표 수집
+		// yeon: pacing 지표 수집
 		OnAvailableBitrateChanged(bitrates.availableBitrate);
 	}
 
@@ -2988,7 +3033,6 @@ namespace RTC
 	{
 		MS_TRACE();
 		OnPacketLossDetected(Loss);
-
 	}
 
 	inline void Transport::OnTransportCongestionControlClientSendRtpPacket(
@@ -2997,8 +3041,8 @@ namespace RTC
 	  const webrtc::PacedPacketInfo& pacingInfo)
 	{
 		MS_TRACE();
-		//MS_ERROR_STD();
-		// Update abs-send-time if present.
+		// MS_ERROR_STD();
+		//  Update abs-send-time if present.
 		packet->UpdateAbsSendTime(DepLibUV::GetTimeMs());
 
 		// Update transport wide sequence number if present.
@@ -3008,8 +3052,8 @@ namespace RTC
 			packet->UpdateTransportWideCc01(this->transportWideCcSeq + 1)
 		)
 		// clang-format on
-		{	
-			//MS_ERROR_STD("no3");
+		{
+			// MS_ERROR_STD("no3");
 			this->transportWideCcSeq++;
 
 			// May emit 'trace' event.

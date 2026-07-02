@@ -18,12 +18,14 @@
 #include "RTC/NetworkState.hpp"
 #include "RTC/SlackPredictor.hpp"
 #include "RTC/FrameRecordCsvWriter.hpp"
+#include "RTC/FramePacketCsvWriter.hpp"
 #include <vector>
 
 // yeon: (pacer 구현)
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#include <memory>
 
 // -------------------------------------------------------------------
 // App message kind
@@ -369,8 +371,10 @@ namespace RTC
 		// yeon: deadline slack
 	public:
 		std::unique_ptr<RTC::NetworkState> networkState;
-		std::unique_ptr<RTC::FrameRecordTable> frameRecordTable;
+		//std::unique_ptr<RTC::FrameRecordTable> frameRecordTable;
+		std::shared_ptr<RTC::FrameRecordTable> frameRecordTable;
 		std::unique_ptr<RTC::FrameRecordCsvWriter> frameRecordCsvWriter;
+		std::unique_ptr<RTC::FramePacketCsvWriter> framePacketCsvWriter;
 	};
 
 } // namespace RTC

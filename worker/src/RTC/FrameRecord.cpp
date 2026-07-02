@@ -100,6 +100,10 @@ namespace RTC
 
 		record.pacingEnabled = builder.pacingEnabled;
 
+		// 패킷 정보도 포함
+		record.packetReceiveTimes    = builder.packetReceiveTimes;
+		record.hasPacketReceiveTimes = builder.hasPacketReceiveTimes;
+
 		record.network = snapshot;
 
 		this->completedRecords[frameId] = record;
@@ -196,7 +200,7 @@ namespace RTC
 		  record.decodeQueueExtractTimeMs >= record.decodeQueueInsertTimeMs;
 
 		if (validFrameBufferResidence && validDecodeQueueResidence)
-		{	
+		{
 			record.hasFrameBufferResidenceMs = true;
 			record.hasDecodeQueueResidenceMs = true;
 
@@ -321,13 +325,16 @@ namespace RTC
 	bool FrameRecordTable::AttachTimingAndDesiredTimes(
 	  uint32_t frameId,
 	  double receiveTimeMs,
-	  double latestDecodeTimeMs,
+	  int64_t latestDecodeTimeMs,
 	  double frameBufferInsertTimeMs,
 	  double frameBufferExtractTimeMs,
 	  double decodeQueueInsertTimeMs,
 	  double decodeQueueExtractTimeMs,
 	  double decodeStartMs,
-	  double decodeFinishMs)
+	  double decodeFinishMs,
+	  int64_t now,
+	  int64_t render_time,
+	  int64_t max_wait)
 	{
 		std::lock_guard<std::mutex> lock(this->mutex);
 
@@ -363,6 +370,15 @@ namespace RTC
 
 		record.hasDecodeFinishMs = true;
 		record.decodeFinishMs    = decodeFinishMs;
+
+		record.hasnow = true;
+		record.now    = now;
+
+		record.hasrender_time = true;
+		record.render_time    = render_time;
+
+		record.hasmax_wait = true;
+		record.max_wait    = max_wait;
 
 		// === 첫 프레임이면 기준 프레임으로 설정 ===
 		if (!this->hasReferenceFrame)
@@ -435,6 +451,30 @@ namespace RTC
 		UpdateDerivedTimingMetrics(record);
 
 		return true;
+	}
+
+	bool FrameRecordTable::AttachPacketReceiveTimes(
+	  uint32_t frameId, const std::vector<PacketReceiveInfo>& packetReceiveTimes)
+	{
+		std::lock_guard<std::mutex> lock(this->mutex);
+
+		auto it = this->completedRecords.find(frameId);
+		if (it != this->completedRecords.end())
+		{
+			it->second.packetReceiveTimes    = packetReceiveTimes;
+			it->second.hasPacketReceiveTimes = !packetReceiveTimes.empty();
+			return true;
+		}
+
+		auto inProgressIt = this->inProgressFrames.find(frameId);
+		if (inProgressIt != this->inProgressFrames.end())
+		{
+			inProgressIt->second.packetReceiveTimes    = packetReceiveTimes;
+			inProgressIt->second.hasPacketReceiveTimes = !packetReceiveTimes.empty();
+			return true;
+		}
+
+		return false;
 	}
 
 	std::optional<FrameRecord> FrameRecordTable::GetCompletedRecord(uint32_t frameId) const
