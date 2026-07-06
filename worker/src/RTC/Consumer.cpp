@@ -627,9 +627,9 @@ namespace RTC
 	// 	return this->recvDeadlineInfo;
 	// }
 
-	double Consumer::GetSyncClockMs() const
-	{
-		return NowEpochMs();
-	}
+	// double Consumer::GetSyncClockMs() const
+	// {
+	// 	return NowEpochMs();
+	// }
 
 } // namespace RTC

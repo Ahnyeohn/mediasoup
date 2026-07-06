@@ -203,7 +203,7 @@ namespace RTC
 		/* Methods inherited from Channel::ChannelSocket::RequestHandler. */
 	public:
 		void HandleRequest(Channel::ChannelRequest* request) override;
-		double GetSyncClockMs() const;
+		// double GetSyncClockMs() const;
 
 	protected:
 		void EmitTraceEventRtpAndKeyFrameTypes(RTC::RtpPacket* packet, bool isRtx = false) const;

@@ -126,7 +126,7 @@ union Body {
     RtpObserver_RemoveProducerRequest: FBS.RtpObserver.RemoveProducerRequest,
 	Consumer_SetRecvDeadlineRequest: FBS.Consumer.SetRecvDeadlineRequest, // yun 
     // yeon
-    Consumer_GetSyncClockRequest: FBS.Consumer.GetSyncClockRequest,
+    // Consumer_GetSyncClockRequest: FBS.Consumer.GetSyncClockRequest,
 }
 
 table Request {
