@@ -344,21 +344,21 @@ export class ConsumerImpl<ConsumerAppData extends AppData = AppData>
 	// 	return Number(data.timeMs());
 	// }
 
-	async getSyncClock(): Promise<number> {
-		//logger.debug('getSyncClock()');
+	// async getSyncClock(): Promise<number> {
+	// 	//logger.debug('getSyncClock()');
 
-		const response = await this.#channel.request(
-			FbsRequest.Method.CONSUMER_GET_SYNC_CLOCK,
-			undefined,
-			undefined,
-			this.#internal.consumerId
-		);
+	// 	const response = await this.#channel.request(
+	// 		FbsRequest.Method.CONSUMER_GET_SYNC_CLOCK,
+	// 		undefined,
+	// 		undefined,
+	// 		this.#internal.consumerId
+	// 	);
 
-		const data = new FbsConsumer.GetSyncClockResponse();
-		response.body(data);
+	// 	const data = new FbsConsumer.GetSyncClockResponse();
+	// 	response.body(data);
 
-		return Number(data.timeMs());
-	}
+	// 	return Number(data.timeMs());
+	// }
 
 	async setPreferredLayers({
 		spatialLayer,

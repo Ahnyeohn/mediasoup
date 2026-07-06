@@ -43,7 +43,7 @@ union Body {
     DataConsumer_AddSubchannelResponse: FBS.DataConsumer.AddSubchannelResponse,
     DataConsumer_RemoveSubchannelResponse: FBS.DataConsumer.RemoveSubchannelResponse,
     // yeon
-    Consumer_GetSyncClockResponse: FBS.Consumer.GetSyncClockResponse,
+    // Consumer_GetSyncClockResponse: FBS.Consumer.GetSyncClockResponse,
 }
 
 table Response {

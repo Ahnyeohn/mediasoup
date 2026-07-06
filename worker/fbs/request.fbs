@@ -80,7 +80,7 @@ enum Method: uint8 {
     RTPOBSERVER_REMOVE_PRODUCER,
 	CONSUMER_SET_RECV_DEADLINE, // yun
     // yeon
-    CONSUMER_GET_SYNC_CLOCK,
+    // CONSUMER_GET_SYNC_CLOCK,
 
 }
 

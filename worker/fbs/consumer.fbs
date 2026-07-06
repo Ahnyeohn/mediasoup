@@ -41,14 +41,13 @@ table SetRecvDeadlineRequest {
 }
 
 // yeon
-table GetSyncClockRequest {
-}
+// table GetSyncClockRequest {}
 
-table GetSyncClockResponse {
+//table GetSyncClockResponse {
     // SFU worker clock in ms.
     // IMPORTANT: use the same clock basis as SFUsendMs.
-    timeMs: double;
-}
+    // timeMs: double;
+//}
 
 enum TraceEventType: uint8 {
     KEYFRAME = 0,

@@ -366,21 +366,21 @@ namespace RTC
 				break;
 			}
 
-			case Channel::ChannelRequest::Method::CONSUMER_GET_SYNC_CLOCK:
-			{
-				const auto nowMs = this->GetSyncClockMs();
-				//const auto* body = request->data->body_as<FBS::Consumer::SetRecvDeadlineRequest>();
+			// case Channel::ChannelRequest::Method::CONSUMER_GET_SYNC_CLOCK:
+			// {
+			// 	const auto nowMs = this->GetSyncClockMs();
+			// 	//const auto* body = request->data->body_as<FBS::Consumer::SetRecvDeadlineRequest>();
 
-				auto responseOffset =
-				  FBS::Consumer::CreateGetSyncClockResponse(
-				    request->GetBufferBuilder(), nowMs);
+			// 	auto responseOffset =
+			// 	  FBS::Consumer::CreateGetSyncClockResponse(
+			// 	    request->GetBufferBuilder(), nowMs);
 
-				request->Accept(
-				  FBS::Response::Body::Consumer_GetSyncClockResponse,
-				  responseOffset);
+			// 	request->Accept(
+			// 	  FBS::Response::Body::Consumer_GetSyncClockResponse,
+			// 	  responseOffset);
 
-				break;
-			}
+			// 	break;
+			// }
 
 			default:
 			{
