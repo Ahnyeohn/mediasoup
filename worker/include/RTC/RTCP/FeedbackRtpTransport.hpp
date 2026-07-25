@@ -57,6 +57,11 @@ namespace RTC
 				int16_t delta{ 0 };        // Delta.
 				bool received{ false };    // Packet received or not.
 				int64_t receivedAtMs{ 0 }; // Received time (ms) in remote timestamp reference.
+
+				// Camel frame-level bandwidth 계산용.
+				// TWCC 수신 시각을 microsecond 단위로 보존한다.
+				// yeon
+				int64_t receivedAtUs{ 0 };
 			};
 
 		public:

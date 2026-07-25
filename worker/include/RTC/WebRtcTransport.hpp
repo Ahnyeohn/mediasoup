@@ -353,7 +353,8 @@ namespace RTC
 		void OnPacketLossDetected(double loss) override;
 		void OnRttUpdated(double rttMs) override;
 		void OnSlack(const uint8_t* msg, size_t len) override;
-
+		uint32_t GetAceBucketSizeBytes() const override;
+		
 	private:
 		// yeon: TokenBucketPacer을 하나만 두고 소유를 함부로 주지 못하게
 		std::unique_ptr<TokenBucketPacer> rtpPacer;

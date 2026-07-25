@@ -6,11 +6,39 @@
 #include "Logger.hpp"
 #include "MediaSoupErrors.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
 static inline double NowEpochMs()
 {
 	using namespace std::chrono;
 	return duration<double, std::milli>(system_clock::now().time_since_epoch()).count();
 }
+namespace
+{
+	double Percentile(std::vector<double> values, double q)
+	{
+		if (values.empty())
+		{
+			return 0.0;
+		}
+
+		std::sort(values.begin(), values.end());
+
+		if (values.size() == 1)
+		{
+			return values.front();
+		}
+
+		const double pos  = q * static_cast<double>(values.size() - 1);
+		const auto idx    = static_cast<size_t>(pos);
+		const auto next   = std::min(idx + 1, values.size() - 1);
+		const double frac = pos - static_cast<double>(idx);
+
+		return values[idx] * (1.0 - frac) + values[next] * frac;
+	}
+} // namespace
 
 namespace RTC
 {
@@ -366,21 +394,21 @@ namespace RTC
 				break;
 			}
 
-			// case Channel::ChannelRequest::Method::CONSUMER_GET_SYNC_CLOCK:
-			// {
-			// 	const auto nowMs = this->GetSyncClockMs();
-			// 	//const auto* body = request->data->body_as<FBS::Consumer::SetRecvDeadlineRequest>();
+				// case Channel::ChannelRequest::Method::CONSUMER_GET_SYNC_CLOCK:
+				// {
+				// 	const auto nowMs = this->GetSyncClockMs();
+				// 	//const auto* body = request->data->body_as<FBS::Consumer::SetRecvDeadlineRequest>();
 
-			// 	auto responseOffset =
-			// 	  FBS::Consumer::CreateGetSyncClockResponse(
-			// 	    request->GetBufferBuilder(), nowMs);
+				// 	auto responseOffset =
+				// 	  FBS::Consumer::CreateGetSyncClockResponse(
+				// 	    request->GetBufferBuilder(), nowMs);
 
-			// 	request->Accept(
-			// 	  FBS::Response::Body::Consumer_GetSyncClockResponse,
-			// 	  responseOffset);
+				// 	request->Accept(
+				// 	  FBS::Response::Body::Consumer_GetSyncClockResponse,
+				// 	  responseOffset);
 
-			// 	break;
-			// }
+				// 	break;
+				// }
 
 			default:
 			{
@@ -631,5 +659,188 @@ namespace RTC
 	// {
 	// 	return NowEpochMs();
 	// }
+
+	bool Consumer::UpdateDecodeSlackLayerCap(double decodeSlackNominalMs, int64_t nowMs)
+	{
+		MS_TRACE();
+		
+		const int8_t currentSpatialLayer = GetCurrentSpatialLayer();
+
+		if (currentSpatialLayer < 0)
+		{
+			return false;
+		}
+
+		if (!std::isfinite(decodeSlackNominalMs))
+		{
+			return false;
+		}
+
+		if (decodeSlackNominalMs < -10000.0 || decodeSlackNominalMs > 100000.0)
+		{
+			return false;
+		}
+
+		static constexpr int64_t BaselineWindowMs{ 10000 };
+		static constexpr int64_t DecisionWindowMs{ 1000 };
+		static constexpr int64_t HoldDownMs{ 3000 };
+
+		static constexpr size_t MinBaselineSamples{ 20u };
+		static constexpr size_t MinDecisionSamples{ 5u };
+
+		// 절대값 기준이 아니라 baseline 대비 비율 기준.
+		static constexpr double BadSlackRatio{ 0.65 };
+		static constexpr double SevereSlackRatio{ 0.45 };
+
+		static constexpr size_t BadCountThreshold{ 3u };
+		static constexpr size_t SevereCountThreshold{ 2u };
+
+		static constexpr double BadFrameRatioThreshold{ 0.15 };
+		static constexpr double SevereFrameRatioThreshold{ 0.08 };
+
+		this->decodeSlackSamples.push_back({ nowMs, decodeSlackNominalMs, currentSpatialLayer });
+
+		while (!this->decodeSlackSamples.empty() &&
+		       nowMs - this->decodeSlackSamples.front().timeMs > BaselineWindowMs)
+		{
+			this->decodeSlackSamples.pop_front();
+		}
+
+		std::vector<double> baselineValues;
+		std::vector<double> decisionValues;
+
+		baselineValues.reserve(this->decodeSlackSamples.size());
+		decisionValues.reserve(this->decodeSlackSamples.size());
+
+		// 우선 현재 spatial layer의 최근 slack만으로 baseline을 만든다.
+		for (const auto& sample : this->decodeSlackSamples)
+		{
+			if (sample.spatialLayer != currentSpatialLayer)
+			{
+				continue;
+			}
+
+			baselineValues.emplace_back(sample.slackMs);
+
+			if (nowMs - sample.timeMs <= DecisionWindowMs)
+			{
+				decisionValues.emplace_back(sample.slackMs);
+			}
+		}
+
+		// 현재 layer sample이 너무 적으면, 초기 구간이라고 보고 전체 sample로 baseline만 대체한다.
+		// 그래도 상수값은 사용하지 않는다.
+		if (baselineValues.size() < MinBaselineSamples)
+		{
+			baselineValues.clear();
+
+			for (const auto& sample : this->decodeSlackSamples)
+			{
+				baselineValues.emplace_back(sample.slackMs);
+			}
+		}
+
+		if (baselineValues.size() < MinBaselineSamples)
+		{
+			return false;
+		}
+
+		if (decisionValues.size() < MinDecisionSamples)
+		{
+			return false;
+		}
+
+		// 최근 정상 slack 수준.
+		// p80을 쓰는 이유:
+		// - 평균은 bad frame이 섞이면 내려감
+		// - min/p10은 문제 frame에 너무 민감함
+		// - p80은 최근 window 안의 "정상적인 높은 slack"을 baseline으로 보기 좋음
+		const double baselineSlackMs = Percentile(baselineValues, 0.80);
+
+		if (!std::isfinite(baselineSlackMs) || baselineSlackMs <= 0.0)
+		{
+			return false;
+		}
+
+		this->decodeSlackBaselineMs = baselineSlackMs;
+
+		const double badThreshold    = baselineSlackMs * BadSlackRatio;
+		const double severeThreshold = baselineSlackMs * SevereSlackRatio;
+
+		size_t badCount{ 0u };
+		size_t severeCount{ 0u };
+
+		for (const auto slackMs : decisionValues)
+		{
+			if (slackMs < badThreshold)
+			{
+				badCount++;
+			}
+
+			if (slackMs < severeThreshold)
+			{
+				severeCount++;
+			}
+		}
+
+		const double badFrameRatio =
+		  static_cast<double>(badCount) / static_cast<double>(decisionValues.size());
+
+		const double severeFrameRatio =
+		  static_cast<double>(severeCount) / static_cast<double>(decisionValues.size());
+
+		const double shortP10SlackMs = Percentile(decisionValues, 0.10);
+
+		int8_t newSlackMaxSpatialLayer{ this->slackMaxSpatialLayer };
+
+		if (severeCount >= SevereCountThreshold || severeFrameRatio >= SevereFrameRatioThreshold || shortP10SlackMs < severeThreshold)
+		{
+			newSlackMaxSpatialLayer = 0;
+			this->slackHoldUntilMs  = nowMs + HoldDownMs;
+		}
+		else if (badCount >= BadCountThreshold || badFrameRatio >= BadFrameRatioThreshold || shortP10SlackMs < badThreshold)
+		{
+			newSlackMaxSpatialLayer = std::max<int8_t>(0, currentSpatialLayer - 1);
+			this->slackHoldUntilMs  = nowMs + HoldDownMs;
+		}
+		else if (nowMs < this->slackHoldUntilMs)
+		{
+			newSlackMaxSpatialLayer = this->slackMaxSpatialLayer;
+		}
+		else
+		{
+			newSlackMaxSpatialLayer = -1;
+		}
+
+		const bool changed = newSlackMaxSpatialLayer != this->slackMaxSpatialLayer;
+
+		if (changed)
+		{
+			MS_WARN_TAG(
+			  bwe,
+			  "decode slack spatial cap changed "
+			  "[old:%d, new:%d, currentSpatial:%d, slack:%.2f, baselineP80:%.2f, "
+			  "badThreshold:%.2f, severeThreshold:%.2f, shortP10:%.2f, "
+			  "badCount:%zu/%zu, severeCount:%zu/%zu, badRatio:%.3f, severeRatio:%.3f]",
+			  static_cast<int>(this->slackMaxSpatialLayer),
+			  static_cast<int>(newSlackMaxSpatialLayer),
+			  static_cast<int>(currentSpatialLayer),
+			  decodeSlackNominalMs,
+			  baselineSlackMs,
+			  badThreshold,
+			  severeThreshold,
+			  shortP10SlackMs,
+			  badCount,
+			  decisionValues.size(),
+			  severeCount,
+			  decisionValues.size(),
+			  badFrameRatio,
+			  severeFrameRatio);
+
+			this->slackMaxSpatialLayer = newSlackMaxSpatialLayer;
+		}
+
+		return changed;
+	}
 
 } // namespace RTC

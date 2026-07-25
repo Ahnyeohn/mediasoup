@@ -30,6 +30,10 @@
 #include <iterator>                                              // std::ostream_iterator
 #include <map>                                                   // std::multimap
 
+#include <fstream>
+#include <iomanip>
+#include <unordered_map>
+
 static bool ContainsBytes(const uint8_t* data, size_t len, const char* needle)
 {
 	const size_t needleLen = std::strlen(needle);
@@ -587,11 +591,17 @@ namespace RTC
 					  this->minOutgoingBitrate);
 				}
 
+				// yeon: camel
 				if (this->tccClient)
 				{
 					// NOTE: This may throw so don't update things before calling this
 					// method.
 					this->tccClient->SetMaxOutgoingBitrate(bitrate);
+
+					if (this->camelClient)
+					{
+						this->camelClient->SetMaxOutgoingBitrate(bitrate);
+					}
 					this->maxOutgoingBitrate = bitrate;
 
 					MS_DEBUG_TAG(bwe, "maximum outgoing bitrate set to %" PRIu32, this->maxOutgoingBitrate);
@@ -600,6 +610,11 @@ namespace RTC
 				}
 				else
 				{
+					if (this->camelClient)
+					{
+						this->camelClient->SetMaxOutgoingBitrate(bitrate);
+					}
+
 					this->maxOutgoingBitrate = bitrate;
 				}
 
@@ -626,11 +641,16 @@ namespace RTC
 					  this->maxOutgoingBitrate);
 				}
 
+				// yeon: camel
 				if (this->tccClient)
 				{
 					// NOTE: This may throw so don't update things before calling this
 					// method.
 					this->tccClient->SetMinOutgoingBitrate(bitrate);
+					if (this->camelClient)
+					{
+						this->camelClient->SetMinOutgoingBitrate(bitrate);
+					}
 					this->minOutgoingBitrate = bitrate;
 
 					MS_DEBUG_TAG(bwe, "minimum outgoing bitrate set to %" PRIu32, this->minOutgoingBitrate);
@@ -639,6 +659,10 @@ namespace RTC
 				}
 				else
 				{
+					if (this->camelClient)
+					{
+						this->camelClient->SetMinOutgoingBitrate(bitrate);
+					}
 					this->minOutgoingBitrate = bitrate;
 				}
 
@@ -995,6 +1019,16 @@ namespace RTC
 						  this->initialAvailableOutgoingBitrate,
 						  this->maxOutgoingBitrate,
 						  this->minOutgoingBitrate);
+
+						// Camel은 패킷별 도착 정보를 제공하는 TWCC 환경에서만 동작 가능.
+						if (bweType == RTC::BweType::TRANSPORT_CC)
+						{
+							this->camelClient = std::make_shared<RTC::CamelCongestionControlClient>(
+							  this,
+							  this->initialAvailableOutgoingBitrate,
+							  this->maxOutgoingBitrate,
+							  this->minOutgoingBitrate);
+						}
 
 						if (IsConnected())
 						{
@@ -1843,7 +1877,7 @@ namespace RTC
 					consumer->ReceiveRtcpReceiverReport(report);
 				}
 
-				if (this->tccClient && !this->mapConsumers.empty())
+				if ((this->tccClient || this->camelClient) && !this->mapConsumers.empty())
 				{
 					float rtt = 0;
 
@@ -1861,7 +1895,17 @@ namespace RTC
 					}
 					// yeon: 이 받은 RTT값을 WebRTCTransport에 전달
 					OnRttUpdated(rtt);
-					this->tccClient->ReceiveRtcpReceiverReport(rr, rtt, DepLibUV::GetTimeMsInt64());
+					// this->tccClient->ReceiveRtcpReceiverReport(rr, rtt, DepLibUV::GetTimeMsInt64());
+
+					// yeon: camel
+					if (this->tccClient)
+					{
+						this->tccClient->ReceiveRtcpReceiverReport(rr, rtt, DepLibUV::GetTimeMsInt64());
+					}
+					if (this->camelClient)
+					{
+						this->camelClient->ReceiveRtcpReceiverReport(rr, rtt, DepLibUV::GetTimeMsInt64());
+					}
 				}
 
 				break;
@@ -2058,6 +2102,14 @@ namespace RTC
 						{
 							this->tccClient->ReceiveRtcpTransportFeedback(feedback);
 						}
+
+						// yeon: camel
+						if (this->camelClient)
+						{
+							this->camelClient->ReceiveRtcpTransportFeedback(feedback);
+						}
+
+						WriteCamelMetricsCsv();
 
 #ifdef ENABLE_RTC_SENDER_BANDWIDTH_ESTIMATOR
 						// Pass it to the SenderBandwidthEstimator client.
@@ -2270,11 +2322,316 @@ namespace RTC
 #endif
 	}
 
+	// yeon: camel
+	// 여기만 수정하면 bitrate를 원하는 cc로 선택 가능
+	uint32_t Transport::GetSelectedAvailableOutgoingBitrate() const
+	{
+		switch (this->outgoingBweAlgorithm)
+		{
+			case OutgoingBweAlgorithm::Gcc:
+			{
+				return this->tccClient ? this->tccClient->GetAvailableBitrate() : 0u;
+			}
+
+			case OutgoingBweAlgorithm::Camel:
+			{
+				if (this->camelClient)
+				{
+					const uint32_t bitrate = this->camelClient->GetAvailableBitrate();
+
+					if (bitrate > 0u)
+					{
+						return bitrate;
+					}
+				}
+
+				// Camel 초기 샘플이 아직 없으면 GCC 사용.
+				return this->tccClient ? this->tccClient->GetAvailableBitrate() : 0u;
+			}
+		}
+
+		return 0u;
+	}
+
+	// 요게 일반 버전
+	// void Transport::DistributeAvailableOutgoingBitrate()
+	// {
+	// 	MS_TRACE();
+
+	// 	MS_ASSERT(this->tccClient, "no TransportCongestionClient");
+
+	// 	std::multimap<uint8_t, RTC::Consumer*> multimapPriorityConsumer;
+
+	// 	// Fill the map with Consumers and their priority (if > 0).
+	// 	for (auto& kv : this->mapConsumers)
+	// 	{
+	// 		auto* consumer = kv.second;
+	// 		auto priority  = consumer->GetBitratePriority();
+
+	// 		if (priority > 0u)
+	// 		{
+	// 			multimapPriorityConsumer.emplace(priority, consumer);
+	// 		}
+	// 	}
+
+	// 	// Nobody wants bitrate. Exit.
+	// 	if (multimapPriorityConsumer.empty())
+	// 	{
+	// 		return;
+	// 	}
+
+	// 	bool baseAllocation = true;
+	// 	// yeon: camel
+	// 	// uint32_t availableBitrate = this->tccClient->GetAvailableBitrate();
+	// 	uint32_t availableBitrate = GetSelectedAvailableOutgoingBitrate();
+
+	// 	// this->tccClient->RescheduleNextAvailableBitrateEvent();
+	// 	if (this->tccClient)
+	// 	{
+	// 		this->tccClient->RescheduleNextAvailableBitrateEvent();
+	// 	}
+
+	// 	MS_DEBUG_DEV("before layer-by-layer iterations [availableBitrate:%" PRIu32 "]", availableBitrate);
+
+	// 	// Redistribute the available bitrate by allowing Consumers to increase
+	// 	// layer by layer. Initially try to spread the bitrate across all
+	// 	// consumers. Then allocate the excess bitrate to Consumers starting
+	// 	// with the highest priorty.
+	// 	while (availableBitrate > 0u)
+	// 	{
+	// 		auto previousAvailableBitrate = availableBitrate;
+
+	// 		for (auto it = multimapPriorityConsumer.rbegin(); it != multimapPriorityConsumer.rend(); ++it)
+	// 		{
+	// 			auto priority  = it->first;
+	// 			auto* consumer = it->second;
+	// 			auto bweType   = this->tccClient->GetBweType();
+
+	// 			// NOLINTNEXTLINE(bugprone-too-small-loop-variable)
+	// 			for (uint8_t i{ 1u }; i <= (baseAllocation ? 1u : priority); ++i)
+	// 			{
+	// 				uint32_t usedBitrate{ 0u };
+	// 				const bool considerLoss = (bweType == RTC::BweType::REMB);
+
+	// 				usedBitrate = consumer->IncreaseLayer(availableBitrate, considerLoss);
+
+	// 				MS_ASSERT(usedBitrate <= availableBitrate, "Consumer used more layer bitrate than given");
+
+	// 				availableBitrate -= usedBitrate;
+
+	// 				// Exit the loop fast if used bitrate is 0.
+	// 				if (usedBitrate == 0u)
+	// 				{
+	// 					break;
+	// 				}
+	// 			}
+	// 		}
+
+	// 		// If no Consumer used bitrate, exit the loop.
+	// 		if (availableBitrate == previousAvailableBitrate)
+	// 		{
+	// 			break;
+	// 		}
+
+	// 		baseAllocation = false;
+	// 	}
+
+	// 	MS_DEBUG_DEV("after layer-by-layer iterations [availableBitrate:%" PRIu32 "]", availableBitrate);
+
+	// 	// Finally instruct Consumers to apply their computed layers.
+	// 	for (auto it = multimapPriorityConsumer.rbegin(); it != multimapPriorityConsumer.rend(); ++it)
+	// 	{
+	// 		auto* consumer = it->second;
+
+	// 		consumer->ApplyLayers();
+	// 	}
+	// }
+
+	// 요게 2에서 바로 0으로 내리는 버전
+	// void Transport::DistributeAvailableOutgoingBitrate()
+	// {
+	// 	MS_TRACE();
+
+	// 	MS_ASSERT(this->tccClient, "no TransportCongestionClient");
+
+	// 	std::multimap<uint8_t, RTC::Consumer*> multimapPriorityConsumer;
+
+	// 	// Fill the map with Consumers and their priority (if > 0).
+	// 	for (auto& kv : this->mapConsumers)
+	// 	{
+	// 		auto* consumer = kv.second;
+	// 		auto priority  = consumer->GetBitratePriority();
+
+	// 		if (priority > 0u)
+	// 		{
+	// 			multimapPriorityConsumer.emplace(priority, consumer);
+	// 		}
+	// 	}
+
+	// 	// Nobody wants bitrate. Exit.
+	// 	if (multimapPriorityConsumer.empty())
+	// 	{
+	// 		return;
+	// 	}
+
+	// 	// yeon: QoS layer policy.
+	// 	// 기존 bitrate allocation이 돌기 전의 target/current spatial layer를 저장한다.
+	// 	// audio/simple consumer는 GetQosTargetSpatialLayer()가 -1을 반환하므로 자동 제외된다.
+	// 	std::unordered_map<RTC::Consumer*, int16_t> previousSpatialLayerByConsumer;
+
+	// 	for (auto it = multimapPriorityConsumer.rbegin(); it != multimapPriorityConsumer.rend(); ++it)
+	// 	{
+	// 		auto* consumer = it->second;
+
+	// 		if (!consumer)
+	// 		{
+	// 			continue;
+	// 		}
+
+	// 		int16_t previousSpatialLayer = consumer->GetQosTargetSpatialLayer();
+
+	// 		if (previousSpatialLayer < 0)
+	// 		{
+	// 			previousSpatialLayer = consumer->GetQosCurrentSpatialLayer();
+	// 		}
+
+	// 		if (previousSpatialLayer >= 0)
+	// 		{
+	// 			previousSpatialLayerByConsumer[consumer] = previousSpatialLayer;
+	// 		}
+	// 	}
+
+	// 	bool baseAllocation = true;
+
+	// 	// yeon: camel
+	// 	// uint32_t availableBitrate = this->tccClient->GetAvailableBitrate();
+	// 	uint32_t availableBitrate = GetSelectedAvailableOutgoingBitrate();
+
+	// 	// this->tccClient->RescheduleNextAvailableBitrateEvent();
+	// 	if (this->tccClient)
+	// 	{
+	// 		this->tccClient->RescheduleNextAvailableBitrateEvent();
+	// 	}
+
+	// 	MS_DEBUG_DEV("before layer-by-layer iterations [availableBitrate:%" PRIu32 "]", availableBitrate);
+
+	// 	// Redistribute the available bitrate by allowing Consumers to increase
+	// 	// layer by layer. Initially try to spread the bitrate across all
+	// 	// consumers. Then allocate the excess bitrate to Consumers starting
+	// 	// with the highest priority.
+	// 	while (availableBitrate > 0u)
+	// 	{
+	// 		auto previousAvailableBitrate = availableBitrate;
+
+	// 		for (auto it = multimapPriorityConsumer.rbegin(); it != multimapPriorityConsumer.rend(); ++it)
+	// 		{
+	// 			auto priority  = it->first;
+	// 			auto* consumer = it->second;
+	// 			auto bweType   = this->tccClient->GetBweType();
+
+	// 			// NOLINTNEXTLINE(bugprone-too-small-loop-variable)
+	// 			for (uint8_t i{ 1u }; i <= (baseAllocation ? 1u : priority); ++i)
+	// 			{
+	// 				uint32_t usedBitrate{ 0u };
+	// 				const bool considerLoss = (bweType == RTC::BweType::REMB);
+
+	// 				usedBitrate = consumer->IncreaseLayer(availableBitrate, considerLoss);
+
+	// 				MS_ASSERT(usedBitrate <= availableBitrate, "Consumer used more layer bitrate than given");
+
+	// 				availableBitrate -= usedBitrate;
+
+	// 				// Exit the loop fast if used bitrate is 0.
+	// 				if (usedBitrate == 0u)
+	// 				{
+	// 					break;
+	// 				}
+	// 			}
+	// 		}
+
+	// 		// If no Consumer used bitrate, exit the loop.
+	// 		if (availableBitrate == previousAvailableBitrate)
+	// 		{
+	// 			break;
+	// 		}
+
+	// 		baseAllocation = false;
+	// 	}
+
+	// 	MS_DEBUG_DEV("after layer-by-layer iterations [availableBitrate:%" PRIu32 "]", availableBitrate);
+
+	// 	// yeon: QoS layer policy override.
+	// 	//
+	// 	// 기존 allocator가 계산한 provisional target을 보고,
+	// 	// 1) 이전 layer가 2였고 이번 allocator 결과가 1이면, 1이 아니라 0으로 바로 내림.
+	// 	// 2) 이전 layer가 0이면, 이번 allocator 결과가 1/2여도 0 유지.
+	// 	//
+	// 	// 여기서는 ApplyLayers()를 호출하지 않는다.
+	// 	// 기존 ApplyLayers() 호출 직전에 provisionalTargetLayers만 수정한다.
+	// 	for (auto& kv : previousSpatialLayerByConsumer)
+	// 	{
+	// 		auto* consumer                     = kv.first;
+	// 		const int16_t previousSpatialLayer = kv.second;
+
+	// 		if (!consumer)
+	// 		{
+	// 			continue;
+	// 		}
+
+	// 		const int16_t normalProvisionalSpatialLayer = consumer->GetQosProvisionalTargetSpatialLayer();
+
+	// 		if (normalProvisionalSpatialLayer < 0)
+	// 		{
+	// 			continue;
+	// 		}
+
+	// 		int16_t forcedSpatialLayer{ -1 };
+
+	// 		// 이전에 이미 spatial 0이었다면 계속 0 유지.
+	// 		if (previousSpatialLayer == 0 && normalProvisionalSpatialLayer > 0)
+	// 		{
+	// 			forcedSpatialLayer = 0;
+	// 		}
+	// 		// 기존 allocator가 2 -> 1로 내리려고 하면 2 -> 0으로 강제.
+	// 		else if (previousSpatialLayer == 2 && normalProvisionalSpatialLayer == 1)
+	// 		{
+	// 			forcedSpatialLayer = 0;
+	// 		}
+
+	// 		if (forcedSpatialLayer >= 0)
+	// 		{
+	// 			MS_WARN_TAG(
+	// 			  bwe,
+	// 			  "QoS layer policy overrides provisional spatial layer "
+	// 			  "[previous:%" PRIi16 ", normal:%" PRIi16 ", forced:%" PRIi16 "]",
+	// 			  previousSpatialLayer,
+	// 			  normalProvisionalSpatialLayer,
+	// 			  forcedSpatialLayer);
+
+	// 			consumer->ForceQosProvisionalSpatialLayer(forcedSpatialLayer);
+	// 		}
+	// 	}
+
+	// 	// Finally instruct Consumers to apply their computed layers.
+	// 	// 기존 루프 그대로 유지.
+	// 	for (auto it = multimapPriorityConsumer.rbegin(); it != multimapPriorityConsumer.rend(); ++it)
+	// 	{
+	// 		auto* consumer = it->second;
+
+	// 		consumer->ApplyLayers();
+	// 	}
+	// }
+
 	void Transport::DistributeAvailableOutgoingBitrate()
 	{
 		MS_TRACE();
 
 		MS_ASSERT(this->tccClient, "no TransportCongestionClient");
+
+		// yeon: 1000 frames at 30fps ~= 33.33s.
+		static constexpr int64_t QosLayerZeroHoldMs{ 33333 };
+
+		const int64_t nowMs = DepLibUV::GetTimeMsInt64();
 
 		std::multimap<uint8_t, RTC::Consumer*> multimapPriorityConsumer;
 
@@ -2296,17 +2653,55 @@ namespace RTC
 			return;
 		}
 
-		bool baseAllocation       = true;
-		uint32_t availableBitrate = this->tccClient->GetAvailableBitrate();
+		// yeon: QoS layer policy.
+		//
+		// 기존 bitrate allocation이 돌기 전에,
+		// 이전에 결정되어 있던 target/current spatial layer를 저장한다.
+		//
+		// audio/simple consumer는 GetQosTargetSpatialLayer() / GetQosCurrentSpatialLayer()
+		// 가 -1을 반환하므로 자동으로 제외된다.
+		std::unordered_map<RTC::Consumer*, int16_t> previousSpatialLayerByConsumer;
 
-		this->tccClient->RescheduleNextAvailableBitrateEvent();
+		for (auto it = multimapPriorityConsumer.rbegin(); it != multimapPriorityConsumer.rend(); ++it)
+		{
+			auto* consumer = it->second;
+
+			if (!consumer)
+			{
+				continue;
+			}
+
+			int16_t previousSpatialLayer = consumer->GetQosTargetSpatialLayer();
+
+			if (previousSpatialLayer < 0)
+			{
+				previousSpatialLayer = consumer->GetQosCurrentSpatialLayer();
+			}
+
+			if (previousSpatialLayer >= 0)
+			{
+				previousSpatialLayerByConsumer[consumer] = previousSpatialLayer;
+			}
+		}
+
+		bool baseAllocation = true;
+
+		// yeon: camel
+		// uint32_t availableBitrate = this->tccClient->GetAvailableBitrate();
+		uint32_t availableBitrate = GetSelectedAvailableOutgoingBitrate();
+
+		// this->tccClient->RescheduleNextAvailableBitrateEvent();
+		if (this->tccClient)
+		{
+			this->tccClient->RescheduleNextAvailableBitrateEvent();
+		}
 
 		MS_DEBUG_DEV("before layer-by-layer iterations [availableBitrate:%" PRIu32 "]", availableBitrate);
 
 		// Redistribute the available bitrate by allowing Consumers to increase
 		// layer by layer. Initially try to spread the bitrate across all
 		// consumers. Then allocate the excess bitrate to Consumers starting
-		// with the highest priorty.
+		// with the highest priority.
 		while (availableBitrate > 0u)
 		{
 			auto previousAvailableBitrate = availableBitrate;
@@ -2348,6 +2743,87 @@ namespace RTC
 
 		MS_DEBUG_DEV("after layer-by-layer iterations [availableBitrate:%" PRIu32 "]", availableBitrate);
 
+		// yeon: QoS layer policy override.
+		//
+		// 요구한 정책:
+		//
+		// 1. 기존 allocator가 2 -> 1로 내리려고 하면,
+		//    1이 아니라 0으로 바로 내린다.
+		//
+		// 2. 그 순간부터 33초 동안 layer 0을 유지한다.
+		//    33초는 30fps 기준 약 1000 frames.
+		//
+		// 3. 33초가 지나면 allocator 결과와 상관없이 layer 1로 강제 상승한다.
+		//
+		// 4. 여기서는 ApplyLayers()를 호출하지 않는다.
+		//    기존 ApplyLayers() 호출 직전에 provisionalTargetLayers만 수정한다.
+		for (auto& kv : previousSpatialLayerByConsumer)
+		{
+			auto* consumer                     = kv.first;
+			const int16_t previousSpatialLayer = kv.second;
+
+			if (!consumer)
+			{
+				continue;
+			}
+
+			const int16_t normalProvisionalSpatialLayer = consumer->GetQosProvisionalTargetSpatialLayer();
+
+			if (normalProvisionalSpatialLayer < 0)
+			{
+				continue;
+			}
+
+			const bool holdActive     = consumer->IsQosLayerZeroHoldActive();
+			const int64_t holdStartMs = consumer->GetQosLayerZeroHoldStartMs();
+
+			const int64_t holdElapsedMs = holdActive && holdStartMs > 0 ? nowMs - holdStartMs : 0;
+
+			const bool holdExpired = holdActive && holdElapsedMs >= QosLayerZeroHoldMs;
+
+			int16_t forcedSpatialLayer{ -1 };
+
+			// Case 1:
+			// 기존 allocator가 2 -> 1로 내리려고 하면,
+			// 1이 아니라 0으로 강제하고 hold 시작.
+			if (!holdActive && previousSpatialLayer == 2 && normalProvisionalSpatialLayer == 1)
+			{
+				forcedSpatialLayer = 0;
+				consumer->StartQosLayerZeroHold(nowMs);
+			}
+			// Case 2:
+			// hold 중이고 아직 33초가 안 지났으면 무조건 0 유지.
+			else if (holdActive && !holdExpired)
+			{
+				forcedSpatialLayer = 0;
+			}
+			// Case 3:
+			// hold 시작 후 33초가 지났으면 allocator 결과와 상관없이 1로 강제 상승.
+			else if (holdActive && holdExpired)
+			{
+				forcedSpatialLayer = 1;
+				// consumer->StopQosLayerZeroHold();
+			}
+
+			if (forcedSpatialLayer >= 0)
+			{
+				MS_WARN_TAG(
+				  bwe,
+				  "QoS layer policy overrides provisional spatial layer "
+				  "[previous:%" PRIi16 ", normal:%" PRIi16 ", forced:%" PRIi16
+				  ", holdActive:%d, holdExpired:%d, holdElapsedMs:%" PRIi64 "/%" PRIi64 "]",
+				  previousSpatialLayer,
+				  normalProvisionalSpatialLayer,
+				  forcedSpatialLayer,
+				  static_cast<int>(holdActive),
+				  static_cast<int>(holdExpired),
+				  holdElapsedMs,
+				  QosLayerZeroHoldMs);
+
+				consumer->ForceQosProvisionalSpatialLayer(forcedSpatialLayer);
+			}
+		}
+
 		// Finally instruct Consumers to apply their computed layers.
 		for (auto it = multimapPriorityConsumer.rbegin(); it != multimapPriorityConsumer.rend(); ++it)
 		{
@@ -2375,7 +2851,18 @@ namespace RTC
 
 		MS_DEBUG_DEV("total desired bitrate: %" PRIu32, totalDesiredBitrate);
 
-		this->tccClient->SetDesiredBitrate(totalDesiredBitrate, forceBitrate);
+		// yeon: camel
+		// this->tccClient->SetDesiredBitrate(totalDesiredBitrate, forceBitrate);
+
+		if (this->tccClient)
+		{
+			this->tccClient->SetDesiredBitrate(totalDesiredBitrate, forceBitrate);
+		}
+
+		if (this->camelClient)
+		{
+			this->camelClient->SetDesiredBitrate(totalDesiredBitrate, forceBitrate);
+		}
 	}
 
 	inline void Transport::EmitTraceEventProbationType(RTC::RtpPacket* /*packet*/) const
@@ -2503,7 +2990,7 @@ namespace RTC
 	inline void Transport::OnConsumerSendRtpPacket(RTC::Consumer* consumer, RTC::RtpPacket* packet)
 	{
 		MS_TRACE();
-		// MS_ERROR_STD();
+		MS_ERROR_STD();
 
 #ifdef MS_RTC_LOGGER_RTP
 		packet->logger.sendTransportId = this->id;
@@ -2536,12 +3023,28 @@ namespace RTC
 			// Indicate the pacer (and prober) that a packet is to be sent.
 			this->tccClient->InsertPacket(packetInfo);
 
+			if (this->camelClient)
+			{
+				this->camelClient->InsertPacket(packetInfo, packet, consumer, DepLibUV::GetTimeMsInt64());
+			}
+
+			// 2. 여기서 최종 상태의 원본 RTP를 FEC encoder에 입력.
+			// 매 패킷마다 호출하지만, 매번 FEC가 생성되는 것은 아님.
+			// std::vector<std::unique_ptr<RTC::RtpPacket>> fecPackets;
+
+			// if (consumer->IsFecEnabled())
+			// {
+			// 	consumer->AddPacketToFecEncoder(packet);
+			// 	fecPackets = consumer->TakeGeneratedFecPackets();
+			// }
+
 			// When using WebRtcServer, the lifecycle of a RTC::UdpSocket maybe longer
 			// than WebRtcTransport so there is a chance for the send callback to be
 			// invoked *after* the WebRtcTransport has been closed (freed). To avoid
 			// invalid memory access we need to use weak_ptr. Same applies in other
 			// send callbacks.
 			const std::weak_ptr<RTC::TransportCongestionControlClient> tccClientWeakPtr(this->tccClient);
+			const std::weak_ptr<RTC::CamelCongestionControlClient> camelClientWeakPtr(this->camelClient);
 
 #ifdef ENABLE_RTC_SENDER_BANDWIDTH_ESTIMATOR
 			std::weak_ptr<RTC::SenderBandwidthEstimator> senderBweWeakPtr(this->senderBwe);
@@ -2576,7 +3079,9 @@ namespace RTC
 			SendRtpPacket(consumer, packet, cb);
 #else
 			const auto* cb = new onSendCallback(
-			  [tccClientWeakPtr, packetInfo](bool sent)
+			  //[tccClientWeakPtr, packetInfo](bool sent)
+			  // yeon: camel
+			  [tccClientWeakPtr, camelClientWeakPtr, packetInfo](bool sent)
 			  {
 				  if (sent)
 				  {
@@ -2586,6 +3091,13 @@ namespace RTC
 					  {
 						  tccClient->PacketSent(packetInfo, DepLibUV::GetTimeMsInt64());
 					  }
+
+					  auto camelClient = camelClientWeakPtr.lock();
+
+					  if (camelClient)
+					  {
+						  camelClient->PacketSent(packetInfo, DepLibUV::GetTimeMsInt64());
+					  }
 				  }
 			  });
 
@@ -2594,16 +3106,16 @@ namespace RTC
 		}
 		else
 		{
-			// MS_ERROR_STD("yes");
-
-			auto preferredLayers = consumer->GetPreferredLayers();
-			auto targetLayers    = consumer->GetTargetLayers();
-			// MS_ERROR_STD("preferred Layer(video): %d", preferredLayers.temporal); // -1로 출력
-			// MS_ERROR_STD("target Layer(video): %d", targetLayers.temporal); // -1로 출력
 			SendRtpPacket(consumer, packet);
 		}
 
 		this->sendRtpTransmission.Update(packet);
+
+		// 4. 보호 그룹이 완성된 경우에만 FEC RTP 전송.
+		// for (auto& fecPacket : fecPackets)
+		// {
+		// 	OnConsumerSendFecPacket(consumer, fecPacket.get());
+		// }
 	}
 
 	inline void Transport::OnConsumerRetransmitRtpPacket(RTC::Consumer* consumer, RTC::RtpPacket* packet)
@@ -2638,6 +3150,7 @@ namespace RTC
 			this->tccClient->InsertPacket(packetInfo);
 
 			const std::weak_ptr<RTC::TransportCongestionControlClient> tccClientWeakPtr(this->tccClient);
+			const std::weak_ptr<RTC::CamelCongestionControlClient> camelClientWeakPtr(this->camelClient);
 
 #ifdef ENABLE_RTC_SENDER_BANDWIDTH_ESTIMATOR
 			std::weak_ptr<RTC::SenderBandwidthEstimator> senderBweWeakPtr = this->senderBwe;
@@ -2672,7 +3185,7 @@ namespace RTC
 			SendRtpPacket(consumer, packet, cb);
 #else
 			const auto* cb = new onSendCallback(
-			  [tccClientWeakPtr, packetInfo](bool sent)
+			  [tccClientWeakPtr, camelClientWeakPtr, packetInfo](bool sent)
 			  {
 				  if (sent)
 				  {
@@ -2681,6 +3194,13 @@ namespace RTC
 					  if (tccClient)
 					  {
 						  tccClient->PacketSent(packetInfo, DepLibUV::GetTimeMsInt64());
+					  }
+
+					  auto camelClient = camelClientWeakPtr.lock();
+
+					  if (camelClient)
+					  {
+						  camelClient->PacketSent(packetInfo, DepLibUV::GetTimeMsInt64());
 					  }
 				  }
 			  });
@@ -2945,33 +3465,34 @@ namespace RTC
 	  uint32_t ppid)
 	{
 		MS_TRACE();
-		//MS_ERROR_STD("OnSctpAssociationMessageReceived");
+		// MS_ERROR_STD("OnSctpAssociationMessageReceived");
 		RTC::DataProducer* dataProducer = this->sctpListener.GetDataProducer(streamId);
 
 		// 1. 구/신버전 정상 DataProducer 경로.
-		if (LooksLikeFrameTelemetryPayload(msg, len, ppid))
-		{
-			// MS_WARN_TAG(
-			//   sctp,
-			//   "[TELEMETRY] frame telemetry payload captured [streamId:%" PRIu16 ", ppid:%" PRIu32
-			//   ", len:%zu, hasDataProducer:%d]",
-			//   streamId,
-			//   ppid,
-			//   len,
-			//   dataProducer ? 1 : 0);
+		// if (LooksLikeFrameTelemetryPayload(msg, len, ppid))
+		// {
+		// 	// MS_WARN_TAG(
+		// 	//   sctp,
+		// 	//   "[TELEMETRY] frame telemetry payload captured [streamId:%" PRIu16 ", ppid:%" PRIu32
+		// 	//   ", len:%zu, hasDataProducer:%d]",
+		// 	//   streamId,
+		// 	//   ppid,
+		// 	//   len,
+		// 	//   dataProducer ? 1 : 0);
 
-			OnSlack(msg, len);
+		// 	OnSlack(msg, len);
 
-			// telemetry를 Node.js app 쪽 DataProducer event로도 넘길 필요가 없다면 return.
-			// CSV/수집만 목적이면 return이 맞습니다.
-			return;
-		}
+		// 	// telemetry를 Node.js app 쪽 DataProducer event로도 넘길 필요가 없다면 return.
+		// 	// CSV/수집만 목적이면 return이 맞습니다.
+		// 	return;
+		// }
 
 		// 2. 구버전 raw/unregistered SCTP 경로.
 		if (!dataProducer)
 		{
-			MS_WARN_TAG(
-			  sctp, "no suitable DataProducer for received SCTP message [streamId:%" PRIu16 "]", streamId);
+			OnSlack(msg, len);
+			// MS_WARN_TAG(
+			//   sctp, "no suitable DataProducer for received SCTP message [streamId:%" PRIu16 "]", streamId);
 
 			return;
 		}
@@ -3010,23 +3531,42 @@ namespace RTC
 		}
 	}
 
+	void Transport::ApplySelectedOutgoingBitrate(RTC::TransportCongestionControlClient::Bitrates& bitrates)
+	{
+		const uint32_t availableBitrate = GetSelectedAvailableOutgoingBitrate();
+
+		DistributeAvailableOutgoingBitrate();
+		ComputeOutgoingDesiredBitrate();
+		// May emit 'trace' event.
+		EmitTraceEventBweType(bitrates);
+		OnAvailableBitrateChanged(GetSelectedAvailableOutgoingBitrate());
+	}
+
 	inline void Transport::OnTransportCongestionControlClientBitrates(
 	  RTC::TransportCongestionControlClient* /*tccClient*/,
 	  RTC::TransportCongestionControlClient::Bitrates& bitrates)
 	{
 		MS_TRACE();
-
 		MS_DEBUG_DEV("outgoing available bitrate:%" PRIu32, bitrates.availableBitrate);
-		// MS_ERROR_STD("outgoing available bitrate:%" PRIu32, bitrates.availableBitrate);
 
-		DistributeAvailableOutgoingBitrate();
-		ComputeOutgoingDesiredBitrate();
+		if (this->outgoingBweAlgorithm == OutgoingBweAlgorithm::Gcc)
+		{
+			ApplySelectedOutgoingBitrate(bitrates);
+		}
+	}
 
-		// May emit 'trace' event.
-		EmitTraceEventBweType(bitrates);
+	// yeon:
+	inline void Transport::OnCamelCongestionControlClientBitrates(
+	  RTC::CamelCongestionControlClient* /*camelClient*/,
+	  RTC::CamelCongestionControlClient::Bitrates& bitrates)
+	{
+		MS_TRACE();
+		MS_DEBUG_DEV("camel outgoing available bitrate:%" PRIu32, bitrates.availableBitrate);
 
-		// yeon: pacing 지표 수집
-		OnAvailableBitrateChanged(bitrates.availableBitrate);
+		if (this->outgoingBweAlgorithm == OutgoingBweAlgorithm::Camel)
+		{
+			ApplySelectedOutgoingBitrate();
+		}
 	}
 
 	inline void Transport::OnPacketLossCheck(double Loss)
@@ -3072,6 +3612,7 @@ namespace RTC
 			this->tccClient->InsertPacket(packetInfo);
 
 			const std::weak_ptr<RTC::TransportCongestionControlClient> tccClientWeakPtr(this->tccClient);
+			const std::weak_ptr<RTC::CamelCongestionControlClient> camelClientWeakPtr(this->camelClient);
 
 #ifdef ENABLE_RTC_SENDER_BANDWIDTH_ESTIMATOR
 			std::weak_ptr<RTC::SenderBandwidthEstimator> senderBweWeakPtr = this->senderBwe;
@@ -3107,7 +3648,7 @@ namespace RTC
 			SendRtpPacket(nullptr, packet, cb);
 #else
 			const auto* cb = new onSendCallback(
-			  [tccClientWeakPtr, packetInfo](bool sent)
+			  [tccClientWeakPtr, camelClientWeakPtr, packetInfo](bool sent)
 			  {
 				  if (sent)
 				  {
@@ -3116,6 +3657,13 @@ namespace RTC
 					  if (tccClient)
 					  {
 						  tccClient->PacketSent(packetInfo, DepLibUV::GetTimeMsInt64());
+					  }
+
+					  auto camelClient = camelClientWeakPtr.lock();
+
+					  if (camelClient)
+					  {
+						  camelClient->PacketSent(packetInfo, DepLibUV::GetTimeMsInt64());
 					  }
 				  }
 			  });
@@ -3192,4 +3740,112 @@ namespace RTC
 			this->rtcpTimer->Start(interval);
 		}
 	}
+
+	void RTC::Transport::WriteCamelMetricsCsv()
+	{
+		static constexpr const char* CsvPath =
+		  "/home/n2sl/yeon/qos/network/log/frame/csv/camel_metrics.csv";
+
+		const auto nowMs = DepLibUV::GetTimeMsInt64();
+
+		uint32_t gccAvailableBitrateBps = 0u;
+
+		if (this->tccClient)
+		{
+			gccAvailableBitrateBps = this->tccClient->GetAvailableBitrate();
+		}
+
+		uint32_t camelAvailableBitrateBps = 0u;
+		double camelAvgFrameBandwidthBps  = 0.0;
+		double camelGamma                 = 1.0;
+		double camelBdpBytes              = 0.0;
+		double camelCwndBytes             = 0.0;
+		uint32_t camelBurstLengthBytes    = 0u;
+
+		if (this->camelClient)
+		{
+			const auto& camelBitrates = this->camelClient->GetBitrates();
+
+			camelAvailableBitrateBps  = camelBitrates.availableBitrate;
+			camelAvgFrameBandwidthBps = camelBitrates.avgFrameBandwidthBps;
+			camelGamma                = camelBitrates.gamma;
+			camelBdpBytes             = camelBitrates.bdpBytes;
+			camelCwndBytes            = camelBitrates.cwndBytes;
+			camelBurstLengthBytes     = camelBitrates.burstLengthBytes;
+		}
+
+		const uint32_t aceBucketSizeBytes = GetAceBucketSizeBytes();
+
+		static bool headerChecked = false;
+		static bool headerWritten = false;
+
+		if (!headerChecked)
+		{
+			std::ifstream in(CsvPath);
+
+			headerWritten = in.good() && in.peek() != std::ifstream::traits_type::eof();
+
+			headerChecked = true;
+		}
+
+		std::ofstream out(CsvPath, std::ios::app);
+
+		if (!out.is_open())
+		{
+			MS_WARN_TAG(bwe, "failed to open Camel metrics CSV [path:%s]", CsvPath);
+			return;
+		}
+
+		if (!headerWritten)
+		{
+			out << "timestampMs,"
+			    << "gccAvailableBitrateBps,"
+			    << "camelAvailableBitrateBps,"
+			    << "camelAvgFrameBandwidthBps,"
+			    << "camelGamma,"
+			    << "camelBdpBytes,"
+			    << "camelCwndBytes,"
+			    << "camelBurstLengthBytes,"
+			    << "aceBucketSizeBytes"
+			    << "\n";
+
+			headerWritten = true;
+		}
+
+		out << nowMs << "," << gccAvailableBitrateBps << "," << camelAvailableBitrateBps << ","
+		    << std::fixed << std::setprecision(3) << camelAvgFrameBandwidthBps << "," << camelGamma
+		    << "," << camelBdpBytes << "," << camelCwndBytes << "," << camelBurstLengthBytes << ","
+		    << aceBucketSizeBytes << "\n";
+	}
+
+	uint32_t Transport::GetCamelBurstLengthBytes() const
+	{
+		if (!this->camelClient)
+		{
+			return 0u;
+		}
+
+		return this->camelClient->GetBurstLengthBytes();
+	}
+
+	uint32_t Transport::GetGccAvailableOutgoingBitrate() const
+	{
+		if (!this->tccClient)
+		{
+			return 0u;
+		}
+
+		return this->tccClient->GetAvailableBitrate();
+	}
+
+	uint32_t Transport::GetCamelAvailableOutgoingBitrate() const
+	{
+		if (!this->camelClient)
+		{
+			return 0u;
+		}
+
+		return this->camelClient->GetAvailableBitrate();
+	}
+
 } // namespace RTC

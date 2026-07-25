@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 
+#include <deque>
+
 namespace RTC
 {
 	using namespace ConsumerTypes;
@@ -255,6 +257,76 @@ namespace RTC
 
 	private:
 		RecvDeadlineInfo recvDeadlineInfo;
+
+	protected:
+		bool qosLayerZeroHoldActive{ false };
+		int64_t qosLayerZeroHoldStartMs{ 0 };
+
+		// yeon: slack 기반 layering
+	public:
+		struct DecodeSlackSample
+		{
+			int64_t timeMs{ 0 };
+			double slackMs{ 0.0 };
+			int16_t spatialLayer{ -1 };
+		};
+
+		bool UpdateDecodeSlackLayerCap(double decodeSlackNominalMs, int64_t nowMs);
+
+		int8_t GetSlackMaxSpatialLayer() const
+		{
+			return this->slackMaxSpatialLayer;
+		}
+
+		virtual int16_t GetQosCurrentSpatialLayer() const
+		{
+			return -1;
+		}
+
+		virtual int16_t GetQosTargetSpatialLayer() const
+		{
+			return -1;
+		}
+
+		virtual int16_t GetQosProvisionalTargetSpatialLayer() const
+		{
+			return -1;
+		}
+
+		virtual void ForceQosProvisionalSpatialLayer(int16_t /*spatialLayer*/)
+		{
+		}
+
+		bool IsQosLayerZeroHoldActive() const
+		{
+			return this->qosLayerZeroHoldActive;
+		}
+
+		void StartQosLayerZeroHold(int64_t nowMs)
+		{
+			this->qosLayerZeroHoldActive  = true;
+			this->qosLayerZeroHoldStartMs = nowMs;
+		}
+
+		void StopQosLayerZeroHold()
+		{
+			this->qosLayerZeroHoldActive  = false;
+			this->qosLayerZeroHoldStartMs = 0;
+		}
+
+		int64_t GetQosLayerZeroHoldStartMs() const
+		{
+			return this->qosLayerZeroHoldStartMs;
+		}
+
+	private:
+		std::deque<DecodeSlackSample> decodeSlackSamples;
+
+		// 고정값이 아니라 최근 sample에서 계산한 baseline을 로그/확인용으로 저장.
+		double decodeSlackBaselineMs{ 0.0 };
+
+		int8_t slackMaxSpatialLayer{ -1 };
+		int64_t slackHoldUntilMs{ 0 };
 	};
 } // namespace RTC
 

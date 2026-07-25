@@ -28,10 +28,8 @@
 #include <array>
 #include <unordered_map>
 
-// yeon: pacing 동작 확인을 위한 코드
+// yeon: RTT 계산, NowUs()
 #include <chrono>
-#include <filesystem>
-#include <fstream>
 
 // yeon: deadline slack을 위한 코드
 #include <algorithm>
@@ -39,31 +37,12 @@
 #include <limits>
 #include <mutex>
 
-// yeon: ispacing을 런타임에 바꾸기 위함
-#include <atomic>
-
 #include <memory>
 
 // ===== pacing 여부 ====
-// static bool ispacing = false;
-static bool ispacingg = false;
-static std::atomic_bool ispacing{ false }; // 처음은 off
-static std::atomic_bool pacingAutoSwitchDone{ false };
-static uint64_t pacingExperimentStartMs{ 0 };
-// static constexpr uint64_t PacingSwitchAfterMs = 50000; //
-static constexpr uint64_t PacingSwitchAfterMs = 5000000; //
+static bool ispacing = false;
 // ===== 패킷 send 분포 로그 ====
 static bool packetsendlog = false;
-
-// ===== bucket size, queue size 로그 저장 =====
-static bool pacinglog            = false;
-static const std::string logPath = "/home/n2sl/yeon/qos/network/log/pacing/ace_bucket_log.csv";
-static bool headerWritten        = false;
-
-// 추가: rtp 페이로드 분석
-static constexpr uint8_t MAGIC_BE[4] = { 0x4c, 0x41, 0x54, 0x4e }; // "LATN"
-static constexpr uint8_t MAGIC_LE[4] = { 0x4e, 0x54, 0x41, 0x4c }; // "NTAL" (JS little-endian로 쓴 경우)
-static constexpr size_t LAT_HEADER_LEN = 32;
 
 static inline uint16_t ReadBE16(const uint8_t* p)
 {
@@ -559,370 +538,6 @@ static std::optional<ParsedSctpAppMessage> ParseSctpData(const uint8_t* data, si
 	return std::nullopt;
 }
 
-static inline double NowEpochMs()
-{
-	using namespace std::chrono;
-	return duration<double, std::milli>(system_clock::now().time_since_epoch()).count();
-}
-
-static inline uint32_t ReadU32LE(const uint8_t* p)
-{
-	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
-static inline double ReadF64LE(const uint8_t* p)
-{
-	// prefix를 little-endian uint64로 조립
-	uint64_t u = (uint64_t)p[0] | ((uint64_t)p[1] << 8) | ((uint64_t)p[2] << 16) |
-	             ((uint64_t)p[3] << 24) | ((uint64_t)p[4] << 32) | ((uint64_t)p[5] << 40) |
-	             ((uint64_t)p[6] << 48) | ((uint64_t)p[7] << 56);
-
-	double d;
-	static_assert(sizeof(double) == sizeof(uint64_t));
-	std::memcpy(&d, &u, sizeof(double));
-	return d;
-}
-
-// 이 함수에서 SFUrecvMs를 페이로드에 write 해야 함
-// 지금 비디오 패킷은 MAGIC 값을 못읽는게 문제임
-bool ParseFramePrefixforReceive(uint8_t* payload, size_t payloadLen, RTC::RtpPacket::RtpPrefix* pfx)
-{
-	if (!pfx)
-	{
-		return false;
-	}
-	if (!payload || payloadLen < LAT_HEADER_LEN)
-	{
-		return false;
-	}
-
-	// STAMP 확인: vp8 descriptor 이슈로 4바이트를 띄워야 함 : 즉, 구조: RTP 헤더 + vp8 codec
-	// descriptor(4) + rtp prefix (여기에 stamp가 맨앞에서 4바이트)..... 즉, 아래 모든 payload 기반
-	// 포인터 연산에서 4를 추가했음
-	if (std::memcmp(payload + 4, MAGIC_LE, 4) != 0)
-	{
-		return false;
-	}
-	const uint32_t stamp = ReadU32LE(payload + 4);
-
-	// 수신 시점 측정
-	const double SFUrecvMs = NowEpochMs();
-
-	// FrameID 읽기
-	const uint32_t frameID = ReadU32LE(payload + 8);
-
-	// sendTsMs 읽기 (offset 8)
-	const double sendTsMs = ReadF64LE(payload + 12);
-	if (!std::isfinite(sendTsMs))
-	{
-		return false;
-	}
-
-	// 여기서 prefix에 기록 (offset 16)
-	WriteF64LE(payload + 20, SFUrecvMs);
-
-	// p2s latency 측정
-	const double p2s = SFUrecvMs - sendTsMs;
-
-	pfx->Stamp     = stamp;
-	pfx->FrameID   = frameID;
-	pfx->sendTsMs  = sendTsMs;
-	pfx->SFUrecvMs = SFUrecvMs;
-	pfx->p2s       = p2s;
-	return true;
-}
-
-bool ParseFramePrefixforSend(uint8_t* payload, size_t payloadLen, RTC::RtpPacket::RtpPrefix* pfx)
-{
-	if (!pfx)
-	{
-		// MS_ERROR_STD("prefix problem");
-		return false;
-	}
-	if (!payload || payloadLen < LAT_HEADER_LEN)
-	{
-		// MS_ERROR_STD("payload problem");
-		return false;
-	}
-
-	// STAMP 확인
-	if (std::memcmp(payload + 4, MAGIC_LE, 4) != 0)
-	{
-		// MS_ERROR_STD("STAMP problem");
-		return false;
-	}
-
-	// 송신 시점 측정
-	const double SFUsendMs = NowEpochMs();
-
-	pfx->SFUsendMs = SFUsendMs;
-	WriteF64LE(payload + 28, SFUsendMs);
-
-	const double testSFUsendMs = ReadF64LE(payload + 28);
-	// MS_ERROR_STD("[test]: SFUsendMs=%.3f", testSFUsendMs);
-	return true;
-}
-
-bool HasMagicPrefix(const uint8_t* payload, size_t payloadLen)
-{
-	if (!payload)
-	{
-		// MS_ERROR_STD("no payload data");
-		return false;
-	}
-	else if (payloadLen < 4)
-	{
-		// MS_ERROR_STD("payload length < 4");
-		return false;
-	}
-
-	// JS에서 big-endian으로 썼다면:
-	if (std::memcmp(payload, MAGIC_BE, 4) == 0)
-	{
-		return true;
-	}
-	else if (std::memcmp(payload, MAGIC_LE, 4) == 0)
-	{
-		return true;
-	}
-	// JS에서 little-endian(true)로 썼다면:
-	// if (std::memcmp(payload, MAGIC_LE, 4) == 0) return true;
-	// MS_ERROR_STD("No Stamp");
-	return false;
-}
-// 추가: rtp 페이로드 분석
-
-// ====== latency prefix를 읽기 위한 vp8 descriptor parser
-struct Vp8PrefixLocateResult
-{
-	bool isVp8FirstPacket{ false }; // S=1 && PID=0
-	bool foundMagic{ false };
-	size_t magicOffset{ 0 };      // offset from payload start
-	size_t vp8DescriptorLen{ 0 }; // parsed VP8 descriptor length
-};
-
-// Parse VP8 payload descriptor length.
-// Returns true on success.
-static bool ParseVp8PayloadDescriptor(
-  const uint8_t* payload, size_t payloadLen, size_t& descLen, bool& isFrameStartPacket)
-{
-	descLen            = 0;
-	isFrameStartPacket = false;
-
-	if (!payload || payloadLen < 1)
-	{
-		return false;
-	}
-
-	// First octet of VP8 payload descriptor:
-	//  X | R | N | S | PID(4)
-	const uint8_t b0 = payload[0];
-
-	const bool X      = (b0 & 0x80) != 0;
-	const bool S      = (b0 & 0x10) != 0;
-	const uint8_t PID = (b0 & 0x0F);
-
-	// For first packet of encoded frame in VP8:
-	// S must be 1, and first partition is PID=0.
-	isFrameStartPacket = (S && PID == 0);
-
-	size_t off = 1; // base descriptor octet consumed
-
-	if (!X)
-	{
-		descLen = off;
-		return true;
-	}
-
-	// Extended control bits octet exists.
-	if (payloadLen < off + 1)
-	{
-		return false;
-	}
-
-	const uint8_t ext = payload[off++];
-	const bool I      = (ext & 0x80) != 0;
-	const bool L      = (ext & 0x40) != 0;
-	const bool T      = (ext & 0x20) != 0;
-	const bool K      = (ext & 0x10) != 0;
-
-	// I: PictureID present
-	if (I)
-	{
-		if (payloadLen < off + 1)
-		{
-			return false;
-		}
-
-		const uint8_t pic0 = payload[off++];
-		const bool M       = (pic0 & 0x80) != 0; // 15-bit PictureID if set
-
-		if (M)
-		{
-			if (payloadLen < off + 1)
-			{
-				return false;
-			}
-			off += 1;
-		}
-	}
-
-	// L: TL0PICIDX present
-	if (L)
-	{
-		if (payloadLen < off + 1)
-		{
-			return false;
-		}
-		off += 1;
-	}
-
-	// T or K => TID/Y/KEYIDX octet present
-	if (T || K)
-	{
-		if (payloadLen < off + 1)
-		{
-			return false;
-		}
-		off += 1;
-	}
-
-	descLen = off;
-	return true;
-}
-
-// Search MAGIC only in early payload area of the FIRST packet.
-// Why not whole payload?
-// To reduce false positives in compressed bitstream.
-static bool FindMagicInWindow(
-  const uint8_t* payload,
-  size_t payloadLen,
-  size_t searchStart,
-  size_t searchEndExclusive,
-  size_t& magicOffset)
-{
-	magicOffset = 0;
-
-	if (!payload || payloadLen < 4 || searchStart >= payloadLen)
-	{
-		return false;
-	}
-
-	const size_t end = std::min(searchEndExclusive, payloadLen);
-
-	if (end < searchStart + 4)
-	{
-		return false;
-	}
-
-	for (size_t i = searchStart; i + 4 <= end; ++i)
-	{
-		if (std::memcmp(payload + i, MAGIC_LE, 4) == 0)
-		{
-			// Ensure full latency header fits in this RTP packet.
-			if (i + LAT_HEADER_LEN <= payloadLen)
-			{
-				magicOffset = i;
-				return true;
-			}
-		}
-	}
-
-	return false;
-}
-
-// Main helper:
-// - Confirm this RTP packet is the FIRST packet of a VP8 frame.
-// - Parse VP8 descriptor length.
-// - Search MAGIC in the early region of payload.
-static Vp8PrefixLocateResult LocateLatencyPrefixInVp8FirstPacket(const uint8_t* payload, size_t payloadLen)
-{
-	Vp8PrefixLocateResult res;
-
-	size_t descLen          = 0;
-	bool isFrameStartPacket = false;
-
-	if (!ParseVp8PayloadDescriptor(payload, payloadLen, descLen, isFrameStartPacket))
-	{
-		return res;
-	}
-
-	res.vp8DescriptorLen = descLen;
-	res.isVp8FirstPacket = isFrameStartPacket;
-
-	if (!isFrameStartPacket)
-	{
-		return res;
-	}
-
-	// Search policy:
-	// Start from descriptor end (best starting point),
-	// but allow a tiny cushion before/after if you want robustness.
-	//
-	// Conservative version:
-	//   search only [descLen, descLen + 64)
-	//
-	// If you want exactly "from payload[0] up to payload[63]" then use:
-	//   FindMagicInWindow(payload, payloadLen, 0, 64, ...)
-	//
-	// I recommend starting at descLen.
-	size_t magicOffset       = 0;
-	const size_t searchStart = descLen;
-	const size_t searchEnd   = descLen + 64;
-
-	if (FindMagicInWindow(payload, payloadLen, searchStart, searchEnd, magicOffset))
-	{
-		res.foundMagic  = true;
-		res.magicOffset = magicOffset;
-	}
-
-	return res;
-}
-
-void HandleVideoRtpPayload(const uint8_t* payload, size_t payloadLen)
-{
-	auto loc = LocateLatencyPrefixInVp8FirstPacket(payload, payloadLen);
-
-	if (!loc.isVp8FirstPacket)
-	{
-		// Not first packet of frame -> skip
-		return;
-	}
-
-	if (!loc.foundMagic)
-	{
-		// For debugging
-		MS_ERROR_STD(
-		  "[VP8 prefix] first packet but MAGIC not found "
-		  "(payloadLen=%zu, descLen=%zu)",
-		  payloadLen,
-		  loc.vp8DescriptorLen);
-		return;
-	}
-
-	const uint8_t* p = payload + loc.magicOffset;
-
-	// Here:
-	// p[0..3]   = MAGIC
-	// p[4..7]   = frameId
-	// p[8..15]  = sendTsMs
-	// p[16..23] = SFUrecvMs
-	// p[24..31] = SFUsendMs
-
-	// Example:
-	const double SFUsendMs = NowEpochMs();
-	WriteF64LE(const_cast<uint8_t*>(p) + 24, SFUsendMs);
-
-	const double check = ReadF64LE(p + 24);
-
-	MS_ERROR_STD(
-	  "[VP8 prefix] found: descLen=%zu magicOff=%zu SFUsendMs=%.3f check=%.3f",
-	  loc.vp8DescriptorLen,
-	  loc.magicOffset,
-	  SFUsendMs,
-	  check);
-}
-
 static int GetVp8FrameType(const uint8_t* payload, size_t len)
 {
 	if (!payload || len < 1)
@@ -983,7 +598,7 @@ static int GetVp8FrameType(const uint8_t* payload, size_t len)
 			{
 				return -1;
 			}
-			pos++;
+			pNos++;
 		}
 
 		if (t || k)
@@ -994,12 +609,6 @@ static int GetVp8FrameType(const uint8_t* payload, size_t len)
 			}
 			pos++;
 		}
-	}
-
-	// ===== LAT prefix가 descriptor 뒤에 들어간 경우 건너뛴다 =====
-	if (pos + LAT_HEADER_LEN <= len && std::memcmp(payload + pos, MAGIC_LE, 4) == 0)
-	{
-		pos += LAT_HEADER_LEN;
 	}
 
 	if (pos >= len)
@@ -1040,6 +649,17 @@ namespace RTC
 
 	// yeon: pacing 구현
 	//  ---- TokenBucketPacer implementation ----
+
+	uint32_t RTC::WebRtcTransport::GetAceBucketSizeBytes() const
+	{
+		if (!this->rtpPacer)
+		{
+			return 0u;
+		}
+
+		return static_cast<uint32_t>(this->rtpPacer->GetBucketSize());
+	}
+
 	WebRtcTransport::TokenBucketPacer::TokenBucketPacer(WebRtcTransport* transport)
 	  : transport(transport)
 	{
@@ -1562,47 +1182,10 @@ namespace RTC
 		}
 
 		// 아래부터는 페이싱 로그를 위한 코드
-		if (!pacinglog)
-		{
-			return;
-		}
-		// 프로그램 실행 중 최초 1회 헤더 작성
-		if (!headerWritten)
-		{
-			bool fileExists = std::filesystem::exists(logPath);
-			std::ofstream headerFile(logPath, std::ios::out | std::ios::app);
-
-			if (headerFile.is_open())
-			{
-				if (!fileExists)
-				{
-					headerFile << "time_ms,rtt_ms,min_rtt_ms,predicted_queue_bytes,bucket_size_bytes\n";
-					headerFile.flush();
-				}
-				headerFile.close();
-				headerWritten = true;
-			}
-		}
-
-		std::ofstream logFile(logPath, std::ios::out | std::ios::app);
-		if (logFile.is_open())
-		{
-			auto now = std::chrono::steady_clock::now();
-			auto nowMs =
-			  std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-
-			logFile << nowMs << "," << this->latestRttMs << "," << this->minRttMs << ","
-			        << this->predictedQueueBytes << "," << this->GetBucketSize() << "\n";
-
-			logFile.flush();
-			logFile.close();
-		}
-
-		// MS_ERROR_STD("bucket size=%f", this->GetBucketSize());
+		// 현재는 필요 없어서 지운 상태
 	}
 
 	// ---- TokenBucketPacer implementation ----
-
 	void RTC::WebRtcTransport::OnAvailableBitrateChanged(uint32_t availableBitrate)
 	{
 		const uint64_t nowMs = DepLibUV::GetTimeMs();
@@ -1658,13 +1241,6 @@ namespace RTC
 	void RTC::WebRtcTransport::OnSlack(const uint8_t* msg, size_t len)
 	{
 		MS_TRACE();
-		// MS_ERROR_STD("OnSlack");
-		// MS_WARN_TAG(
-		//   sctp,
-		//   "[SLACK] transportId:%s raw telemetry payload len:%zu text:%s",
-		//   this->id.c_str(),
-		//   len,
-		//   text.c_str());
 
 		if (!msg || len == 0)
 		{
@@ -1675,7 +1251,7 @@ namespace RTC
 		// msg는 null-terminated가 아닐 수 있으므로 len 기반으로 문자열 생성
 		const std::string text(reinterpret_cast<const char*>(msg), len);
 
-		//MS_WARN_TAG(sctp, "[SLACK] raw telemetry payload len:%zu text:%s", len, text.c_str());
+		// MS_WARN_TAG(sctp, "[SLACK] raw telemetry payload len:%zu text:%s", len, text.c_str());
 
 		std::string type;
 		if (!ExtractJsonString(text, "type", type))
@@ -1741,14 +1317,6 @@ namespace RTC
 			return;
 		}
 
-		// MS_WARN_TAG(
-		//   sctp,
-		//   "[SLACK] decode timing bundle frameId:%" PRIu64 " latestDecodeTimeMs:%" PRId64 " now:%"
-		//   PRId64 " render_time:%" PRId64 " max_wait:%" PRId64, rtpTimestamp64, latestDecodeTimeMs,
-		//   now,
-		//   render_time,
-		//   max_wait);
-
 		if (!ExtractJsonUint64(text, "frameBufferInsertTimeMs", frameBufferInsertTimeMs))
 		{
 			MS_WARN_TAG(sctp, "[SLACK] failed to parse FrameBufferInsertTimeMs payload:%s", text.c_str());
@@ -1779,42 +1347,45 @@ namespace RTC
 			packetReceiveTimes.clear();
 		}
 
+		// yeon: slack 기반 layering (가장 단순한 코드)
 		// 현재 frameId는 RTP timestamp를 사용 중
-		const uint32_t frameId = static_cast<uint32_t>(rtpTimestamp64);
-
-		// slack = latestDecodeTimeUs - receiveTimeUs
-		// if (decodeStartMs < receiveTimeMs)
-		// {
-		// 	MS_WARN_TAG(
-		// 	  sctp,
-		// 	  "[SLACK] invalid telemetry: decodeStartMs(%" PRIu64 ") < receiveTimeMs(%" PRIu64
-		// 	  ") frameId:%" PRIu32,
-		// 	  decodeStartMs,
-		// 	  receiveTimeMs,
-		// 	  frameId);
-		// }
-
+		const uint32_t frameId        = static_cast<uint32_t>(rtpTimestamp64);
 		const double slackMs          = static_cast<double>(decodeStartMs - receiveTimeMs);
 		const double decoding_latency = static_cast<double>(decodeFinishMs - decodeStartMs);
 		bool attached{ false };
+
+		const auto nowMs = DepLibUV::GetTimeMsInt64();
+
+		bool slackLayerCapChanged = false;
+
+
+		// for (auto& kv : this->mapConsumers) // 이 for문 자체가 작동을 안함
+		// {	
+		// 	auto* consumer = kv.second;
+		// 	if (!consumer)
+		// 	{
+		// 		continue;
+		// 	}
+		// 	slackLayerCapChanged =
+		// 	  consumer->UpdateDecodeSlackLayerCap(slackMs, nowMs) || slackLayerCapChanged;
+		// }
+
+		if (slackLayerCapChanged)
+		{
+			MS_WARN_TAG(bwe, "decode slack layer cap changed, redistributing available outgoing bitrate");
+
+			DistributeAvailableOutgoingBitrate();
+			ComputeOutgoingDesiredBitrate();
+		}
 
 		if (this->frameRecordTable)
 		{
 			// this->frameRecordTable->AttachTimingAndDesiredTimes(
 			//   frameId, receiveTimeMs, decodeStartMs, decodeFinishMs);
 			this->frameRecordTable->AttachTimingAndDesiredTimes(
-			  frameId,
-			  receiveTimeMs,
-			  latestDecodeTimeMs,
-			  frameBufferInsertTimeMs,
-			  frameBufferExtractTimeMs,
-			  decodeQueueInsertTimeMs,
-			  decodeQueueExtractTimeMs,
-			  decodeStartMs,
-			  decodeFinishMs,
-			  now,
-			  render_time,
-			  max_wait);
+			  frameId, receiveTimeMs, latestDecodeTimeMs, frameBufferInsertTimeMs, frameBufferExtractTimeMs, 
+			  decodeQueueInsertTimeMs, decodeQueueExtractTimeMs, decodeStartMs, decodeFinishMs,
+			  now, render_time, max_wait);
 			this->frameRecordTable->AttachPacketReceiveTimes(frameId, packetReceiveTimes);
 
 			attached = this->frameRecordTable->AttachSlack(frameId, slackMs);
@@ -1829,10 +1400,6 @@ namespace RTC
 			  slackMs,
 			  text.c_str());
 			return;
-		}
-		else
-		{
-			// MS_ERROR_STD("no error");
 		}
 
 		if (attached && this->frameRecordTable && this->slackPredictor)
@@ -1865,13 +1432,10 @@ namespace RTC
 				}
 			}
 		}
-		// MS_WARN_TAG(
-		//   sctp,
-		//   "[SLACK] attached frameId:%" PRIu32 " receiveTimeUs:%" PRIu64 " latestDecodeTimeUs:%"
-		//   PRIu64 " slackMs:%.3f", frameId, receiveTimeUs, latestDecodeTimeUs, slackMs);
 	} // 지금 네트워크 지표는 Slack과 더불어, 그때의 네트워크 상황이 수집되고 있음
 	// 즉, 계산된 네트워크 Slack과 프레임 아이디인 Timestamp가 과거 데이터와 합체된다.
 	// 이제 이걸 사용해서 slack을 예측하는 코드를 개발하면 된다.
+
 	/**
 	 * This constructor is used when the WebRtcTransport doesn't use a WebRtcServer.
 	 */
@@ -2144,24 +1708,24 @@ namespace RTC
 		//--//
 
 		// yeon: deadline slack
-		this->networkState     = std::make_unique<RTC::NetworkState>();
-		//this->frameRecordTable = std::make_unique<RTC::FrameRecordTable>(5000); // 5000개만 저장하기
+		this->networkState = std::make_unique<RTC::NetworkState>();
+		// this->frameRecordTable = std::make_unique<RTC::FrameRecordTable>(5000); // 5000개만 저장하기
 		this->frameRecordTable = GetSharedFrameRecordTable();
 		this->slackPredictor   = std::make_unique<RTC::SlackPredictor>();
 
-		if (ispacingg)
+		if (ispacing)
 		{
 			this->frameRecordCsvWriter = std::make_unique<RTC::FrameRecordCsvWriter>(
-			  "/home/n2sl/yeon/qos/network/log/frame/frame_records_pacing.csv");
+			  "/home/n2sl/yeon/qos/network/log/frame/csv/frame_records_pacing.csv");
 		}
 		else
 		{
 			this->frameRecordCsvWriter = std::make_unique<RTC::FrameRecordCsvWriter>(
-			  "/home/n2sl/yeon/qos/network/log/frame/frame_records.csv");
+			  "/home/n2sl/yeon/qos/network/log/frame/csv/frame_records.csv");
 		}
 
 		this->framePacketCsvWriter = std::make_unique<RTC::FramePacketCsvWriter>(
-		  "/home/n2sl/yeon/qos/network/log/frame/frame_packets.csv");
+		  "/home/n2sl/yeon/qos/network/log/frame/csv/frame_packets.csv");
 
 		try
 		{
@@ -2924,25 +2488,7 @@ namespace RTC
 		// 여기서 currentPredictedSlack 또는 heuristic score를 바탕으로
 		// pacer parameter를 조정할 수 있음
 
-		// ===== pacing experiment: runtime switch off -> on =====
-		const uint64_t nowMs = DepLibUV::GetTimeMs();
-
-		if (pacingExperimentStartMs == 0)
-		{
-			pacingExperimentStartMs = nowMs;
-		}
-
-		if (!pacingAutoSwitchDone.load() && nowMs - pacingExperimentStartMs >= PacingSwitchAfterMs)
-		{
-			ispacing.store(true);
-			pacingAutoSwitchDone.store(true);
-
-			MS_ERROR_STD("[PACING-EXP] pacing switched ON at %" PRIu64 " ms", nowMs);
-		}
-
-		const bool pacingEnabled = ispacing.load();
-
-		if (this->rtpPacer && pacingEnabled)
+		if (this->rtpPacer && ispacing)
 		{
 			this->rtpPacer->Enqueue(consumer, packet, cb);
 		}
@@ -2998,18 +2544,6 @@ namespace RTC
 			return;
 		}
 
-		// HandleVideoRtpPayload(packet->GetPayload(), packet->GetPayloadLength());
-		if (ParseFramePrefixforSend(packet->GetPayload(), packet->GetPayloadLength(), &packet->rtpPrefix))
-		{
-			const double SFUlatency = packet->rtpPrefix.SFUsendMs - packet->rtpPrefix.SFUrecvMs;
-			// MS_ERROR_STD("[STAMP] FrameID=%d, p2s= %.3f, SFUlatency=%.3f, a=%d",
-			// 	packet->rtpPrefix.FrameID, packet->rtpPrefix.p2s, SFUlatency, a);
-
-			// MS_ERROR_STD("[STAMP] FrameID=%d, sendTsMs= %.3f, SFUsendMs=%.3f, SFUrecvMs=%.3f,
-			// SFUlatency=%.3f", 	packet->rtpPrefix.FrameID, packet->rtpPrefix.sendTsMs,
-			// packet->rtpPrefix.SFUsendMs, packet->rtpPrefix.SFUrecvMs, SFUlatency);
-		}
-
 		const uint8_t* data = packet->GetData();
 		auto len            = packet->GetSize();
 
@@ -3062,10 +2596,15 @@ namespace RTC
 
 			if (this->rtpPacer)
 			{
-				snapshot.pacingBacklogBytes = static_cast<double>(this->rtpPacer->queuedBytes);
+				snapshot.pacingBacklogBytes    = static_cast<double>(this->rtpPacer->queuedBytes);
+				snapshot.pacingBucketSizeBytes = this->rtpPacer->GetBucketSize();
 			}
 
-			const bool pacingEnabled = ispacing.load();
+			// yeon: Camel burst length snapshot.
+			// frame record는 snapshot을 복사해서 저장하므로 여기서 채워야 함.
+			snapshot.camelBurstLengthBytes    = GetCamelBurstLengthBytes();
+			snapshot.gccAvailableBitrateBps   = GetGccAvailableOutgoingBitrate();
+			snapshot.camelAvailableBitrateBps = GetCamelAvailableOutgoingBitrate();
 
 			this->frameRecordTable->OnPacketSent(
 			  frameId,
@@ -3077,7 +2616,7 @@ namespace RTC
 			  currentSpatialLayer,
 			  targetSpatialLayer,
 			  preferredSpatialLayer,
-			  pacingEnabled,
+			  ispacing,
 			  nowMs,
 			  snapshot);
 
@@ -3379,12 +2918,6 @@ namespace RTC
 			MS_WARN_TAG(rtp, "received data is not a valid RTP packet");
 
 			return;
-		}
-
-		// 추가: SFU RTP 패킷 페이로드 확인 및 prefix를 찾는 코드
-		// 패킷이 복호화되고 나서부터 데이터를 읽을 수 있으므로 그 이후 진행
-		if (ParseFramePrefixforReceive(packet->GetPayload(), packet->GetPayloadLength(), &packet->rtpPrefix))
-		{
 		}
 
 		// Trick for clients performing aggressive ICE regardless we are ICE-Lite.

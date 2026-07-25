@@ -111,13 +111,16 @@ namespace RTC
 
 		// === 추가: 브라우저 timing 내부 계산값 ===
 		bool hasnow{ false };
-		int64_t  now{ 0 };
+		int64_t now{ 0 };
 
 		bool hasrender_time{ false };
-		int64_t  render_time{ 0 };
+		int64_t render_time{ 0 };
 
 		bool hasmax_wait{ false };
-		int64_t  max_wait{ 0 };
+		int64_t max_wait{ 0 };
+
+		// yeon: Camel burst length controller output.
+		uint32_t camelBurstLengthBytes{ 0u };
 	};
 
 	struct FrameBuilder
@@ -187,9 +190,9 @@ namespace RTC
 		  double decodeQueueExtractTimeMs,
 		  double decodeStartMs,
 		  double decodeFinishMs,
-		  int64_t  now,
-		  int64_t  render_time,
-		  int64_t  max_wait);
+		  int64_t now,
+		  int64_t render_time,
+		  int64_t max_wait);
 
 		bool AttachPacketReceiveTimes(
 		  uint32_t frameId, const std::vector<PacketReceiveInfo>& packetReceiveTimes);

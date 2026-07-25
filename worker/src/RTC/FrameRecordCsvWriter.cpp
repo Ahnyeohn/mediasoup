@@ -37,7 +37,7 @@ namespace RTC
 			          //   << "lastPacketSentAtMs,"
 			          //   << "frameSizeBytes,"
 			          //   << "packetCount,"
-			          // << "isKeyFrame, "
+			          << "isKeyFrame, "
 			          //  << "temporalLayer, "
 			          //  << "spatialLayer,"
 			          << "currentSpatialLayer, "
@@ -47,8 +47,9 @@ namespace RTC
 			          << "rttMs, "
 			          << "lossRate, "
 			          << "availableBitrateBps, "
-			          //  << "aceQueueBytes, "
-			          //  << "pacingBacklogBytes, "
+			          << "gccAvailableBitrateBps, "
+			          << "camelAvailableBitrateBps, "
+
 			          //  << "predictedSlackMs, "
 			          << "receiveTimeMs, "
 			          << "latestDecodeTimeMs, "
@@ -73,6 +74,10 @@ namespace RTC
 			          << "frameBufferResidenceMs, "
 			          << "decodeQueueResidenceMs, "
 			          << "decodeSlackEffectiveMs, "
+			          << "aceQueueBytes, "
+			          << "pacingBacklogBytes, "
+			          << "pacingBucketSizeBytes,"
+			          << "camelBurstLengthBytes, "
 			          << "pacing\n";
 			//  << "errorMs\n";
 			this->out.flush();
@@ -105,28 +110,28 @@ namespace RTC
 		  //   << record.lastPacketSentAtMs << ","
 		  //   << record.frameSizeBytes << ","
 		  //   << record.packetCount << ","
-		  //<< (record.isKeyFrame ? 1 : 0)
-		  //<< ", "
+		  << (record.isKeyFrame ? 1 : 0) << ", "
 		  //   << static_cast<uint32_t>(record.temporalLayer) << ","
 
 		  //<< static_cast<uint32_t>(record.SpatialLayer) << ","
-		  << record.currentSpatialLayer << ", " 
-		  << record.targetSpatialLayer << ", "
+		  << record.currentSpatialLayer << ", " << record.targetSpatialLayer << ", "
 		  << record.preferredSpatialLayer << ", "
 
-		  << record.network.rttMs << ", " 
-		  << record.network.lossRate << ", "
-		  << record.network.availableBitratebps
-		  << ", "
-		  //   << record.network.aceQueueBytes << ", "
-		  //   << record.network.pacingBacklogBytes << ", "
+		  << record.network.rttMs << ", " << record.network.lossRate << ", "
+		  << record.network.availableBitratebps << ", " 
+		  << record.network.gccAvailableBitrateBps << ", "
+		  << record.network.camelAvailableBitrateBps << ", "
 		  //  << predicted << ", "
 		  << (record.hasReceiveTimeMs ? std::to_string(record.receiveTimeMs) : "") << ", "
 		  << (record.hasLatestDecodeTimeMs ? std::to_string(record.latestDecodeTimeMs) : "") << ", "
-		  << (record.hasFrameBufferInsertTimeMs ? std::to_string(record.frameBufferInsertTimeMs) : "") << ", "
-		  << (record.hasFrameBufferExtractTimeMs ? std::to_string(record.frameBufferExtractTimeMs) : "") << ", "
-		  << (record.hasDecodeQueueInsertTimeMs ? std::to_string(record.decodeQueueInsertTimeMs) : "") << ", "
-		  << (record.hasDecodeQueueExtractTimeMs ? std::to_string(record.decodeQueueExtractTimeMs) : "") << ", "
+		  << (record.hasFrameBufferInsertTimeMs ? std::to_string(record.frameBufferInsertTimeMs) : "")
+		  << ", "
+		  << (record.hasFrameBufferExtractTimeMs ? std::to_string(record.frameBufferExtractTimeMs) : "")
+		  << ", "
+		  << (record.hasDecodeQueueInsertTimeMs ? std::to_string(record.decodeQueueInsertTimeMs) : "")
+		  << ", "
+		  << (record.hasDecodeQueueExtractTimeMs ? std::to_string(record.decodeQueueExtractTimeMs) : "")
+		  << ", "
 
 		  << (record.hasnow ? std::to_string(record.now) : "") << ", "
 		  << (record.hasrender_time ? std::to_string(record.render_time) : "") << ", "
@@ -137,15 +142,20 @@ namespace RTC
 		  << (record.hasDesiredReceiveTimeMs ? std::to_string(record.desiredReceiveTimeMs) : "") << ", "
 		  << (record.hasDesiredDecodeStartMs ? std::to_string(record.desiredDecodeStartMs) : "") << ", "
 		  << actual << ", "
-		  << (record.hasActualSlackEffectiveMs ? std::to_string(record.actualSlackEffectiveMs) : "") << ", " 
-		  << (record.hasReceiveSlackMs ? std::to_string(record.receiveSlackMs) : "") << ", "
-		  << (record.hasDecodeSlackNominalMs ? std::to_string(record.decodeSlackNominalMs) : "") << ", "
+		  << (record.hasActualSlackEffectiveMs ? std::to_string(record.actualSlackEffectiveMs) : "")
+		  << ", " << (record.hasReceiveSlackMs ? std::to_string(record.receiveSlackMs) : "") << ", "
+		  << (record.hasDecodeSlackNominalMs ? std::to_string(record.decodeSlackNominalMs) : "")
+		  << ", "
 		  //<< (record.hasQueueResidenceMs ? std::to_string(record.queueResidenceMs) : "") << ", "
-		  << (record.hasFrameBufferResidenceMs ? std::to_string(record.frameBufferResidenceMs) : "") << ", "
-		  << (record.hasDecodeQueueResidenceMs ? std::to_string(record.decodeQueueResidenceMs) : "") << ", "
+		  << (record.hasFrameBufferResidenceMs ? std::to_string(record.frameBufferResidenceMs) : "")
+		  << ", "
+		  << (record.hasDecodeQueueResidenceMs ? std::to_string(record.decodeQueueResidenceMs) : "")
+		  << ", "
 
-		  << (record.hasDecodeSlackEffectiveMs ? std::to_string(record.decodeSlackEffectiveMs) : "") << ", " 
-		  << record.pacingEnabled << "\n";
+		  << (record.hasDecodeSlackEffectiveMs ? std::to_string(record.decodeSlackEffectiveMs) : "")
+		  << ", " << record.network.aceQueueBytes << ", " << record.network.pacingBacklogBytes << ", "
+		  << record.network.pacingBucketSizeBytes << ", " << record.network.camelBurstLengthBytes
+		  << ", " << record.pacingEnabled << "\n";
 
 		//  << error << "\n";
 

@@ -162,6 +162,38 @@ namespace RTC
 		// video key frame.
 		std::map<uint16_t, RTC::SharedRtpPacket, RTC::SeqManager<uint16_t>::SeqLowerThan>
 		  targetLayerRetransmissionBuffer;
+
+	public:
+		int16_t GetQosCurrentSpatialLayer() const override
+		{
+			return this->currentSpatialLayer;
+		}
+
+		int16_t GetQosTargetSpatialLayer() const override
+		{
+			return this->targetLayers.spatial;
+		}
+
+		int16_t GetQosProvisionalTargetSpatialLayer() const override
+		{
+			return this->provisionalTargetLayers.spatial;
+		}
+
+		void ForceQosProvisionalSpatialLayer(int16_t spatialLayer) override
+		{
+			if (spatialLayer < 0)
+			{
+				return;
+			}
+
+			if (spatialLayer >= static_cast<int16_t>(this->producerRtpStreams.size()))
+			{
+				return;
+			}
+
+			this->provisionalTargetLayers.spatial  = spatialLayer;
+			this->provisionalTargetLayers.temporal = 0;
+		}
 	};
 } // namespace RTC
 

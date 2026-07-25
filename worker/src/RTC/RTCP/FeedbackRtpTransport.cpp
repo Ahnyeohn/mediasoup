@@ -399,9 +399,31 @@ namespace RTC
 				chunk->FillResults(packetResults, currentSequenceNumber);
 			}
 
+			// size_t deltaIdx{ 0u };
+			// // NOLINTNEXTLINE (bugprone-misplaced-widening-cast)
+			// auto currentReceivedAtMs = static_cast<int64_t>(this->referenceTime * 64);
+
+			// for (size_t idx{ 0u }; idx < packetResults.size(); ++idx)
+			// {
+			// 	auto& packetResult = packetResults[idx];
+
+			// 	if (!packetResult.received)
+			// 	{
+			// 		continue;
+			// 	}
+
+			// 	currentReceivedAtMs += this->deltas.at(deltaIdx) / 4;
+			// 	packetResult.delta        = this->deltas.at(deltaIdx);
+			// 	packetResult.receivedAtMs = currentReceivedAtMs;
+			// 	deltaIdx++;
+			// }
+
+			// yeon
 			size_t deltaIdx{ 0u };
-			// NOLINTNEXTLINE (bugprone-misplaced-widening-cast)
-			auto currentReceivedAtMs = static_cast<int64_t>(this->referenceTime * 64);
+
+			// TWCC referenceTime의 단위는 64ms.
+			// microsecond로 변환하면 64,000us.
+			int64_t currentReceivedAtUs = static_cast<int64_t>(this->referenceTime) * 64000LL;
 
 			for (size_t idx{ 0u }; idx < packetResults.size(); ++idx)
 			{
@@ -412,9 +434,17 @@ namespace RTC
 					continue;
 				}
 
-				currentReceivedAtMs += this->deltas.at(deltaIdx) / 4;
-				packetResult.delta        = this->deltas.at(deltaIdx);
-				packetResult.receivedAtMs = currentReceivedAtMs;
+				// TWCC delta 하나의 단위는 250us.
+				const int16_t delta250Us = this->deltas.at(deltaIdx);
+
+				currentReceivedAtUs += static_cast<int64_t>(delta250Us) * 250LL;
+
+				packetResult.delta        = delta250Us;
+				packetResult.receivedAtUs = currentReceivedAtUs;
+
+				// 기존 코드와의 호환성을 위해 ms 값도 유지.
+				packetResult.receivedAtMs = currentReceivedAtUs / 1000LL;
+
 				deltaIdx++;
 			}
 

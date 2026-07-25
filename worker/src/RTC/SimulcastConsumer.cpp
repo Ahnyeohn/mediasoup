@@ -18,6 +18,7 @@
 
 #include <array>
 #include <unordered_map>
+#include <algorithm>
 
 // yeon: 네트워크 상황이 악화되어도 spatial layer를 고정시켜서 slack이 어떻게 변하는지 확인하기 위함
 static bool forceSpatialLayerEnabled = true;
@@ -535,14 +536,67 @@ namespace RTC
 		MS_TRACE();
 		// MS_ERROR_STD("IncreaseLayer()");
 
+		// MS_ASSERT(this->externallyManagedBitrate, "bitrate is not externally managed");
+		// MS_ASSERT(IsActive(), "should be active");
+
+		// // If already in the preferred layers, do nothing.
+		// if (this->provisionalTargetLayers == this->preferredLayers)
+		// {
+		// 	return 0u;
+		// }	
+
+		// yeon: slack 기반 layering
 		MS_ASSERT(this->externallyManagedBitrate, "bitrate is not externally managed");
 		MS_ASSERT(IsActive(), "should be active");
 
-		// If already in the preferred layers, do nothing.
-		if (this->provisionalTargetLayers == this->preferredLayers)
+		// Preferred spatial layer에 slack 기반 cap을 반영한다.
+		// slackMaxSpatialLayer == -1 이면 제한 없음.
+		int16_t effectivePreferredSpatialLayer = this->preferredLayers.spatial;
+
+		const int8_t slackMaxSpatialLayer = GetSlackMaxSpatialLayer();
+
+		if (slackMaxSpatialLayer >= 0)
+		{
+			if (effectivePreferredSpatialLayer < 0)
+			{
+				effectivePreferredSpatialLayer = slackMaxSpatialLayer;
+			}
+			else
+			{
+				effectivePreferredSpatialLayer =
+				  std::min<int16_t>(effectivePreferredSpatialLayer, slackMaxSpatialLayer);
+			}
+		}
+
+		// If already in the effective preferred layers, do nothing.
+		if (
+		  this->provisionalTargetLayers.spatial == effectivePreferredSpatialLayer &&
+		  this->provisionalTargetLayers.temporal == this->preferredLayers.temporal)
 		{
 			return 0u;
 		}
+
+		// Slack cap이 현재 provisional target보다 낮으면,
+		// 여기서는 layer를 increase하지 말고 provisional target을 즉시 낮춘다.
+		// 이 반환값은 budget을 소모하지 않으므로 0을 반환한다.
+		if (effectivePreferredSpatialLayer >= 0 && this->provisionalTargetLayers.spatial > effectivePreferredSpatialLayer)
+		{
+			MS_WARN_TAG(
+			  bwe,
+			  "forcing provisional spatial layer down due to decode slack cap "
+			  "[provisional:%" PRIi16 ", effectivePreferred:%" PRIi16 ", preferred:%" PRIi16
+			  ", slackCap:%" PRIi8 "]",
+			  this->provisionalTargetLayers.spatial,
+			  effectivePreferredSpatialLayer,
+			  this->preferredLayers.spatial,
+			  slackMaxSpatialLayer);
+
+			this->provisionalTargetLayers.spatial  = effectivePreferredSpatialLayer;
+			this->provisionalTargetLayers.temporal = 0;
+
+			return 0u;
+		}
+		// ...... //
 
 		uint32_t virtualBitrate;
 
@@ -599,13 +653,30 @@ namespace RTC
 				continue;
 			}
 			// If this is the higher than preferred spatial layer, abort.
-			else if (spatialLayer > this->preferredLayers.spatial)
+			// else if (spatialLayer > this->preferredLayers.spatial)
+			// {
+			// 	MS_DEBUG_DEV(
+			// 	  "avoid upgrading to spatial layer %" PRIi16
+			// 	  " since it's higher than preferred spatial layer %" PRIi16,
+			// 	  spatialLayer,
+			// 	  this->preferredLayers.spatial);
+
+			// 	goto done;
+			// }
+
+			// yeon: slack 기반 layering
+			// If this is higher than effective preferred spatial layer, abort.
+			// effectivePreferredSpatialLayer는 preferredLayers.spatial에 slack cap을 반영한 값이다.
+			else if (effectivePreferredSpatialLayer >= 0 && spatialLayer > effectivePreferredSpatialLayer)
 			{
 				MS_DEBUG_DEV(
 				  "avoid upgrading to spatial layer %" PRIi16
-				  " since it's higher than preferred spatial layer %" PRIi16,
+				  " since it's higher than effective preferred spatial layer %" PRIi16
+				  " [preferred:%" PRIi16 ", slackCap:%" PRIi8 "]",
 				  spatialLayer,
-				  this->preferredLayers.spatial);
+				  effectivePreferredSpatialLayer,
+				  this->preferredLayers.spatial,
+				  slackMaxSpatialLayer);
 
 				goto done;
 			}
@@ -720,7 +791,14 @@ namespace RTC
 			}
 
 			// If this is the preferred spatial layer or higher, take it and exit.
-			if (spatialLayer >= this->preferredLayers.spatial)
+			// if (spatialLayer >= this->preferredLayers.spatial)
+			// {
+			// 	break;
+			// }
+
+			// yeon: slack 기반 layering
+			// If this is the effective preferred spatial layer or higher, take it and exit.
+			if (effectivePreferredSpatialLayer >= 0 && spatialLayer >= effectivePreferredSpatialLayer)
 			{
 				break;
 			}
@@ -1275,380 +1353,6 @@ namespace RTC
 				this->lastSentPacketHasMarker = packet->HasMarker();
 			}
 
-			// MS_ERROR_STD("Temporal layer: %u, current termproal layer: %d", packet->GetTemporalLayer(),
-			// this->encodingContext->GetCurrentTemporalLayer());
-
-			// static uint64_t lastLogMs = 0;
-			// const uint64_t nowMs      = DepLibUV::GetTimeMs();
-
-			// // 1초에 1번만 찍기(로그 폭발 방지)
-			// if (nowMs - lastLogMs >= 1000)
-			// {
-			// 	lastLogMs = nowMs;
-
-			// 	const uint32_t ssrc = packet->GetSsrc();
-			// 	const uint32_t ts   = packet->GetTimestamp();
-			// 	const uint16_t seq  = packet->GetSequenceNumber();
-
-			// 	// 1) encodingIdx / rid / ssrc
-			// 	int encodingIdx = FindEncodingIdxBySsrc(this->rtpParameters, ssrc);
-
-			// 	const char* ridStr = "unknown";
-			// 	if (encodingIdx >= 0 && static_cast<size_t>(encodingIdx) <
-			// this->rtpParameters.encodings.size())
-			// 	{
-			// 		const auto& enc = this->rtpParameters.encodings[static_cast<size_t>(encodingIdx)];
-			// 		// enc.rid가 std::string이면: 맞음
-			// 		ridStr = enc.rid.c_str();
-			// 	}
-
-			// 	// 2) VP8 descriptor: PictureID / TL0PICIDX / TID
-			// 	Vp8DescInfo info;
-			// 	const uint8_t* payload = packet->GetPayload();
-			// 	const size_t plen      = packet->GetPayloadLength();
-			// 	ParseVp8PayloadDescriptor(payload, plen, info);
-
-			// 	// 보기 좋게 출력 값 구성
-			// 	int tidOut = info.hasTid ? static_cast<int>(info.tid) : -1;
-			// 	int picOut = info.hasPictureId ? static_cast<int>(info.pictureId) : -1;
-			// 	int tl0Out = info.hasTl0PicIdx ? static_cast<int>(info.tl0PicIdx) : -1;
-
-			// 	MS_ERROR_STD(
-			// 	  "[SIMULCAST_DBG] encIdx=%d rid=%s ssrc=%" PRIu32 " seq=%" PRIu16 " ts=%" PRIu32
-			// 	  " tid=%d picId=%d tl0=%d",
-			// 	  encodingIdx,
-			// 	  ridStr,
-			// 	  ssrc,
-			// 	  seq,
-			// 	  ts,
-			// 	  tidOut,
-			// 	  picOut,
-			// 	  tl0Out);
-			// }
-
-			//===== BEGIN: 1초 요약 로그 =====
-			// struct SimulcastDbgAgg
-			// {
-			// 	uint32_t lastTs{ 0 };
-			// 	bool hasLastTs{ false };
-
-			// 	uint32_t allFrames{ 0 };
-			// 	uint32_t keyFrames{ 0 };
-
-			// 	std::array<uint32_t, 4> tidPkts{ 0, 0, 0, 0 };   // 0,1,2,unk
-			// 	std::array<uint32_t, 4> tidFrames{ 0, 0, 0, 0 }; // 0,1,2,unk
-
-			// 	int lastEncodingIdx{ -1 };
-			// };
-
-			// static uint64_t dbgWindowStartMs{ 0 };
-			// static std::unordered_map<uint32_t, SimulcastDbgAgg> dbgAggBySsrc;
-
-			// const uint64_t dbgNowMs = DepLibUV::GetTimeMs();
-			// if (dbgWindowStartMs == 0)
-			// {
-			// 	dbgWindowStartMs = dbgNowMs;
-			// }
-
-			// const uint32_t dbgSsrc = packet->GetSsrc();
-			// const uint32_t dbgTs   = packet->GetTimestamp();
-
-			// int dbgTid = static_cast<int>(packet->GetTemporalLayer());
-			// if (dbgTid < 0 || dbgTid > 2)
-			// {
-			// 	dbgTid = 3; // unknown
-			// }
-
-			// // 현재 패킷이 어느 encoding에 속하는지 추정
-			// int dbgEncodingIdx = -1;
-			// for (size_t i = 0; i < this->rtpParameters.encodings.size(); ++i)
-			// {
-			// 	const auto& enc = this->rtpParameters.encodings[i];
-			// 	if (enc.ssrc == dbgSsrc)
-			// 	{
-			// 		dbgEncodingIdx = static_cast<int>(i);
-			// 		break;
-			// 	}
-			// }
-
-			// auto& dbgSt           = dbgAggBySsrc[dbgSsrc];
-			// dbgSt.lastEncodingIdx = dbgEncodingIdx;
-
-			// // timestamp 변화 = 새 frame
-			// if (!dbgSt.hasLastTs || dbgSt.lastTs != dbgTs)
-			// {
-			// 	dbgSt.hasLastTs = true;
-			// 	dbgSt.lastTs    = dbgTs;
-
-			// 	dbgSt.allFrames++;
-			// 	dbgSt.tidFrames[dbgTid]++;
-
-			// 	if (packet->IsKeyFrame())
-			// 	{
-			// 		dbgSt.keyFrames++;
-			// 	}
-			// }
-
-			// dbgSt.tidPkts[dbgTid]++;
-
-			// if (dbgNowMs - dbgWindowStartMs >= 1000)
-			// {
-			// 	auto targetLayers = this->GetTargetLayers();
-
-			// 	for (auto& kv : dbgAggBySsrc)
-			// 	{
-			// 		const uint32_t logSsrc = kv.first;
-			// 		const auto& logSt      = kv.second;
-
-			// 		MS_ERROR_STD(
-			// 		  "[SIMULCAST_SUMMARY] ssrc=%" PRIu32
-			// 		  " encIdx=%d"
-			// 		  " targetSpatial=%d targetTemporal=%d"
-			// 		  " frames=%" PRIu32 "/s keyFrames=%" PRIu32
-			// 		  "/s"
-			// 		  " tid_frames=[0:%" PRIu32 ",1:%" PRIu32 ",2:%" PRIu32 ",unk:%" PRIu32
-			// 		  "]"
-			// 		  " tid_pkts=[0:%" PRIu32 ",1:%" PRIu32 ",2:%" PRIu32 ",unk:%" PRIu32 "]",
-			// 		  logSsrc,
-			// 		  logSt.lastEncodingIdx,
-			// 		  static_cast<int>(targetLayers.spatial),
-			// 		  static_cast<int>(targetLayers.temporal),
-			// 		  logSt.allFrames,
-			// 		  logSt.keyFrames,
-			// 		  logSt.tidFrames[0],
-			// 		  logSt.tidFrames[1],
-			// 		  logSt.tidFrames[2],
-			// 		  logSt.tidFrames[3],
-			// 		  logSt.tidPkts[0],
-			// 		  logSt.tidPkts[1],
-			// 		  logSt.tidPkts[2],
-			// 		  logSt.tidPkts[3]);
-			// 	}
-
-			// 	dbgAggBySsrc.clear();
-			// 	dbgWindowStartMs = dbgNowMs;
-			// }
-
-			// ===== DEBUG: consumer forwarding temporal layer + actual frame fps =====
-			// struct FrameAgg
-			// {
-			// 	// 현재 열려 있는 frame 상태
-			// 	uint32_t currentTs{ 0 };
-			// 	bool hasCurrentTs{ false };
-
-			// 	// 현재 frame 대표 정보
-			// 	bool currentFrameIsKey{ false };
-			// 	bool currentFrameFirstPacketSeen{ false };
-			// 	int currentFrameFirstTid{ 3 }; // 0,1,2,unk
-
-			// 	// 1초 윈도우 집계
-			// 	uint32_t frames{ 0 };
-			// 	uint32_t keyFrames{ 0 };
-
-			// 	// 패킷 기준 / frame 기준 TID 분포
-			// 	std::array<uint32_t, 4> tidPkts{ 0, 0, 0, 0 };
-			// 	std::array<uint32_t, 4> tidFrames{ 0, 0, 0, 0 };
-
-			// 	// 현재 frame 내부 패킷 TID 관측
-			// 	std::array<uint32_t, 4> frameTidSeen{ 0, 0, 0, 0 };
-
-			// 	int lastEncodingIdx{ -1 };
-			// };
-
-			// static uint64_t dbgWindowStartMs{ 0 };
-			// static std::unordered_map<uint32_t, FrameAgg> dbgBySsrc;
-
-			// const uint64_t dbgNowMs = DepLibUV::GetTimeMs();
-			// if (dbgWindowStartMs == 0)
-			// {
-			// 	dbgWindowStartMs = dbgNowMs;
-			// }
-
-			// const uint32_t dbgSsrc = packet->GetSsrc();
-			// const uint32_t dbgTs   = packet->GetTimestamp();
-
-			// int dbgTid = static_cast<int>(packet->GetTemporalLayer());
-			// if (dbgTid < 0 || dbgTid > 2)
-			// {
-			// 	dbgTid = 3; // unknown
-			// }
-
-			// // 현재 패킷이 어느 encoding에 속하는지 추정
-			// int dbgEncodingIdx = -1;
-			// for (size_t i = 0; i < this->rtpParameters.encodings.size(); ++i)
-			// {
-			// 	const auto& enc = this->rtpParameters.encodings[i];
-			// 	if (enc.ssrc == dbgSsrc)
-			// 	{
-			// 		dbgEncodingIdx = static_cast<int>(i);
-			// 		break;
-			// 	}
-			// }
-
-			// auto finalizeFrame = [](FrameAgg& st)
-			// {
-			// 	if (!st.hasCurrentTs)
-			// 	{
-			// 		return;
-			// 	}
-
-			// 	st.frames++;
-
-			// 	if (st.currentFrameIsKey)
-			// 	{
-			// 		st.keyFrames++;
-			// 	}
-
-			// 	// 현재 frame의 대표 TID = frame 내부에서 가장 많이 나온 TID
-			// 	uint32_t bestIdx = 3; // default unknown
-			// 	uint32_t bestVal = st.frameTidSeen[3];
-
-			// 	for (uint32_t i = 0; i < 3; ++i)
-			// 	{
-			// 		if (st.frameTidSeen[i] >= bestVal)
-			// 		{
-			// 			bestVal = st.frameTidSeen[i];
-			// 			bestIdx = i;
-			// 		}
-			// 	}
-
-			// 	st.tidFrames[bestIdx]++;
-
-			// 	// reset
-			// 	st.hasCurrentTs                = false;
-			// 	st.currentFrameIsKey           = false;
-			// 	st.currentFrameFirstPacketSeen = false;
-			// 	st.currentFrameFirstTid        = 3;
-			// 	st.frameTidSeen                = { 0, 0, 0, 0 };
-			// };
-
-			// auto& dbgSt           = dbgBySsrc[dbgSsrc];
-			// dbgSt.lastEncodingIdx = dbgEncodingIdx;
-
-			// // timestamp 기반 새 frame 시작
-			// if (!dbgSt.hasCurrentTs)
-			// {
-			// 	dbgSt.hasCurrentTs = true;
-			// 	dbgSt.currentTs    = dbgTs;
-
-			// 	// frame 첫 패킷에서만 keyframe 판정 기록
-			// 	dbgSt.currentFrameFirstPacketSeen = true;
-			// 	dbgSt.currentFrameFirstTid        = dbgTid;
-			// 	dbgSt.currentFrameIsKey           = packet->IsKeyFrame();
-			// }
-			// else if (dbgSt.currentTs != dbgTs)
-			// {
-			// 	finalizeFrame(dbgSt);
-
-			// 	dbgSt.hasCurrentTs = true;
-			// 	dbgSt.currentTs    = dbgTs;
-
-			// 	// 새 frame의 첫 패킷
-			// 	dbgSt.currentFrameFirstPacketSeen = true;
-			// 	dbgSt.currentFrameFirstTid        = dbgTid;
-			// 	dbgSt.currentFrameIsKey           = packet->IsKeyFrame();
-			// }
-
-			// // 현재 frame에 패킷 반영
-			// dbgSt.frameTidSeen[dbgTid]++;
-			// dbgSt.tidPkts[dbgTid]++;
-
-			// // 1초마다 출력
-			// if (dbgNowMs - dbgWindowStartMs >= 1000)
-			// {
-			// 	auto targetLayers = this->GetTargetLayers();
-
-			// 	// current layers 관련 API가 build마다 다를 수 있어서
-			// 	// 아래 두 줄은 환경에 맞게 맞추세요.
-			// 	auto currentLayers = this->encodingContext->GetCurrentLayers();
-
-			// 	uint32_t totalFrames    = 0;
-			// 	uint32_t totalKeyFrames = 0;
-			// 	std::array<uint32_t, 4> totalTidFrames{ 0, 0, 0, 0 };
-			// 	std::array<uint32_t, 4> totalTidPkts{ 0, 0, 0, 0 };
-
-			// 	for (auto& kv : dbgBySsrc)
-			// 	{
-			// 		const uint32_t logSsrc = kv.first;
-			// 		auto& logSt            = kv.second;
-
-			// 		// 아직 열려 있는 마지막 frame도 포함
-			// 		finalizeFrame(logSt);
-
-			// 		totalFrames += logSt.frames;
-			// 		totalKeyFrames += logSt.keyFrames;
-
-			// 		for (size_t i = 0; i < 4; ++i)
-			// 		{
-			// 			totalTidFrames[i] += logSt.tidFrames[i];
-			// 			totalTidPkts[i] += logSt.tidPkts[i];
-			// 		}
-
-			// 		MS_ERROR_STD(
-			// 		  "[CONSUMER_STAT] consumerId=%s"
-			// 		  //" ssrc=%" PRIu32
-			// 		  " encIdx=%d"
-			// 		  " targetSpatial=%d targetTemporal=%d"
-			// 		  " currentSpatial=%d currentTemporal=%d"
-			// 		  " frames=%" PRIu32
-			// 		  "/s"
-			// 		  " keyFrames=%" PRIu32
-			// 		  "/s"
-			// 		  " tid_frames=[0:%" PRIu32 ",1:%" PRIu32 ",2:%" PRIu32 ",unk:%" PRIu32
-			// 		  "]"
-			// 		  " tid_pkts=[0:%" PRIu32 ",1:%" PRIu32 ",2:%" PRIu32 ",unk:%" PRIu32 "]",
-			// 		  this->id.c_str(),
-			// 		  logSsrc,
-			// 		  logSt.lastEncodingIdx,
-			// 		  static_cast<int>(targetLayers.spatial),
-			// 		  static_cast<int>(targetLayers.temporal),
-			// 		  static_cast<int>(currentLayers.spatial),
-			// 		  static_cast<int>(currentLayers.temporal),
-			// 		  logSt.frames,
-			// 		  logSt.keyFrames,
-			// 		  logSt.tidFrames[0],
-			// 		  logSt.tidFrames[1],
-			// 		  logSt.tidFrames[2],
-			// 		  logSt.tidFrames[3],
-			// 		  logSt.tidPkts[0],
-			// 		  logSt.tidPkts[1],
-			// 		  logSt.tidPkts[2],
-			// 		  logSt.tidPkts[3]);
-			// 	}
-
-			// 	MS_ERROR_STD(
-			// 	  "[CONSUMER_LAYER_FPS_TOTAL] consumerId=%s"
-			// 	  " targetSpatial=%d targetTemporal=%d"
-			// 	  " currentSpatial=%d currentTemporal=%d"
-			// 	  " totalFrames=%" PRIu32
-			// 	  "/s"
-			// 	  " totalKeyFrames=%" PRIu32
-			// 	  "/s"
-			// 	  " totalTidFrames=[0:%" PRIu32 ",1:%" PRIu32 ",2:%" PRIu32 ",unk:%" PRIu32
-			// 	  "]"
-			// 	  " totalTidPkts=[0:%" PRIu32 ",1:%" PRIu32 ",2:%" PRIu32 ",unk:%" PRIu32 "]",
-			// 	  this->id.c_str(),
-			// 	  static_cast<int>(targetLayers.spatial),
-			// 	  static_cast<int>(targetLayers.temporal),
-			// 	  static_cast<int>(currentLayers.spatial),
-			// 	  static_cast<int>(currentLayers.temporal),
-			// 	  totalFrames,
-			// 	  totalKeyFrames,
-			// 	  totalTidFrames[0],
-			// 	  totalTidFrames[1],
-			// 	  totalTidFrames[2],
-			// 	  totalTidFrames[3],
-			// 	  totalTidPkts[0],
-			// 	  totalTidPkts[1],
-			// 	  totalTidPkts[2],
-			// 	  totalTidPkts[3]);
-
-			// 	dbgBySsrc.clear();
-			// 	dbgWindowStartMs = dbgNowMs;
-			// }
-			// ===== END DEBUG =====
-
-			//===== END: 1초 요약 로그 =====
 			// Send the packet.
 			this->listener->OnConsumerSendRtpPacket(this, packet);
 
@@ -2194,17 +1898,14 @@ namespace RTC
 		// 	  static_cast<size_t>(forcedSpatialLayer) < this->producerRtpStreams.size() &&
 		// 	  this->producerRtpStreams[forcedSpatialLayer] != nullptr)
 		// 	{
-		// 		if (newTargetSpatialLayer != forcedSpatialLayer || newTargetTemporalLayer != forcedTemporalLayer)
+		// 		if (newTargetSpatialLayer != forcedSpatialLayer || newTargetTemporalLayer !=
+		// forcedTemporalLayer)
 		// 		{
 		// 			MS_WARN_TAG(
 		// 			  simulcast,
-		// 			  "[LAYER-EXP] force target layer %" PRIi16 ":%" PRIi16 " instead of %" PRIi16 ":%" PRIi16
-		// 			  " [consumerId:%s]",
-		// 			  forcedSpatialLayer,
-		// 			  forcedTemporalLayer,
-		// 			  newTargetSpatialLayer,
-		// 			  newTargetTemporalLayer,
-		// 			  this->id.c_str());
+		// 			  "[LAYER-EXP] force target layer %" PRIi16 ":%" PRIi16 " instead of %" PRIi16 ":%"
+		// PRIi16 			  " [consumerId:%s]", 			  forcedSpatialLayer, 			  forcedTemporalLayer,
+		// newTargetSpatialLayer, 			  newTargetTemporalLayer, 			  this->id.c_str());
 		// 		}
 
 		// 		newTargetSpatialLayer  = forcedSpatialLayer;

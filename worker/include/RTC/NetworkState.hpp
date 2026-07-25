@@ -12,16 +12,24 @@ namespace RTC
 		double twccDelayTrend{ 0.0 };
 		double availableBitratebps{ 0.0 };
 
+		// 추가
+		uint32_t gccAvailableBitrateBps{ 0u };
+		uint32_t camelAvailableBitrateBps{ 0u };
+
 		double aceQueueBytes{ 0.0 };
 		double pacingBacklogBytes{ 0.0 };
+		double pacingBucketSizeBytes{ 0.0 }; // yeon: ACE/token bucket size
 
 		uint64_t updatedAtMs{ 0 };
+
+		// yeon: Camel burst length controller output.
+		uint32_t camelBurstLengthBytes{ 0u };
 	};
 
 	class NetworkState
 	{
 	public:
-		NetworkState() = default;
+		NetworkState()  = default;
 		~NetworkState() = default;
 
 	public:

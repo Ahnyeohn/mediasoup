@@ -24,6 +24,7 @@
 #ifdef ENABLE_RTC_SENDER_BANDWIDTH_ESTIMATOR
 #include "RTC/SenderBandwidthEstimator.hpp"
 #endif
+#include "RTC/CamelCongestionControlClient.hpp"
 #include "RTC/TransportCongestionControlClient.hpp"
 #include "RTC/TransportCongestionControlServer.hpp"
 #include "handles/TimerHandle.hpp"
@@ -33,6 +34,12 @@
 
 namespace RTC
 {
+	enum class OutgoingBweAlgorithm
+	{
+		Gcc,
+		Camel
+	};
+
 	class Transport : public RTC::Producer::Listener,
 	                  public RTC::Consumer::Listener,
 	                  public RTC::DataProducer::Listener,
@@ -45,7 +52,8 @@ namespace RTC
 #ifdef ENABLE_RTC_SENDER_BANDWIDTH_ESTIMATOR
 	                  public RTC::SenderBandwidthEstimator::Listener,
 #endif
-	                  public TimerHandle::Listener
+	                  public TimerHandle::Listener,
+	                  public RTC::CamelCongestionControlClient::Listener
 	{
 	protected:
 		using onSendCallback   = const std::function<void(bool sent)>;
@@ -211,13 +219,19 @@ namespace RTC
 		virtual void SendSctpData(const uint8_t* data, size_t len) = 0;
 		virtual void RecvStreamClosed(uint32_t ssrc)               = 0;
 		virtual void SendStreamClosed(uint32_t ssrc)               = 0;
-		void DistributeAvailableOutgoingBitrate();
-		void ComputeOutgoingDesiredBitrate(bool forceBitrate = false);
+		// void DistributeAvailableOutgoingBitrate();
+		// void ComputeOutgoingDesiredBitrate(bool forceBitrate = false);
 		void EmitTraceEventProbationType(RTC::RtpPacket* packet) const;
 		void EmitTraceEventBweType(RTC::TransportCongestionControlClient::Bitrates& bitrates) const;
 		void CheckNoProducer(const std::string& producerId) const;
 		void CheckNoDataProducer(const std::string& dataProducerId) const;
 		void CheckNoDataConsumer(const std::string& dataConsumerId) const;
+
+	// yeon: slack 기반 layering 
+	// 원래 private인데 임시로 public 사용
+	public:
+		void DistributeAvailableOutgoingBitrate();
+		void ComputeOutgoingDesiredBitrate(bool forceBitrate = false);
 
 		/* Pure virtual methods inherited from RTC::Producer::Listener. */
 	public:
@@ -329,12 +343,21 @@ namespace RTC
 		// Passed by argument.
 		std::string id;
 
-	//yeon:
+		// yeon:
 	protected:
-		virtual void OnAvailableBitrateChanged(uint32_t bitrate) {}
-		virtual void OnPacketLossDetected(double loss) {}
-		virtual void OnRttUpdated(double rttMs) {}
-		virtual void OnSlack(const uint8_t* msg, size_t len) {}
+		virtual void OnAvailableBitrateChanged(uint32_t bitrate)
+		{
+		}
+		virtual void OnPacketLossDetected(double loss)
+		{
+		}
+		virtual void OnRttUpdated(double rttMs)
+		{
+		}
+		virtual void OnSlack(const uint8_t* msg, size_t len)
+		{
+		}
+		uint32_t GetCamelBurstLengthBytes() const;
 
 	protected:
 		RTC::Shared* shared{ nullptr };
@@ -342,7 +365,9 @@ namespace RTC
 		// Allocated by this.
 		RTC::SctpAssociation* sctpAssociation{ nullptr };
 
-	private:
+		// yeon: slack 기반 layering
+		// 원래 private인데 임시로 public 사용
+	public:
 		// Passed by argument.
 		Listener* listener{ nullptr };
 		// Allocated by this.
@@ -353,9 +378,11 @@ namespace RTC
 		absl::flat_hash_map<uint32_t, RTC::Consumer*> mapSsrcConsumer;
 		absl::flat_hash_map<uint32_t, RTC::Consumer*> mapRtxSsrcConsumer;
 		TimerHandle* rtcpTimer{ nullptr };
+
 	protected:
 		std::shared_ptr<RTC::TransportCongestionControlClient> tccClient{ nullptr };
 		std::shared_ptr<RTC::TransportCongestionControlServer> tccServer{ nullptr };
+
 #ifdef ENABLE_RTC_SENDER_BANDWIDTH_ESTIMATOR
 		std::shared_ptr<RTC::SenderBandwidthEstimator> senderBwe{ nullptr };
 #endif
@@ -379,7 +406,27 @@ namespace RTC
 		uint32_t minOutgoingBitrate{ 0u };
 		struct TraceEventTypes traceEventTypes;
 
+		// yeon: Camel frame-level congestion control client
+	protected:
+		std::shared_ptr<RTC::CamelCongestionControlClient> camelClient{ nullptr };
+		void WriteCamelMetricsCsv();
+		uint32_t GetGccAvailableOutgoingBitrate() const;
+		uint32_t GetCamelAvailableOutgoingBitrate() const;
+		virtual uint32_t GetAceBucketSizeBytes() const
+		{
+			return 0u;
+		}
+
+	private:
+		OutgoingBweAlgorithm outgoingBweAlgorithm{ OutgoingBweAlgorithm::Gcc };
+		uint32_t GetSelectedAvailableOutgoingBitrate() const;
+
+	public:
+		void OnCamelCongestionControlClientBitrates(
+		  RTC::CamelCongestionControlClient* camelClient,
+		  RTC::CamelCongestionControlClient::Bitrates& bitrates) override;
 	};
+
 } // namespace RTC
 
 #endif

@@ -134,6 +134,8 @@ common_sources = [
   'src/RTC/Transport.cpp',
   'src/RTC/TransportCongestionControlClient.cpp',
   'src/RTC/TransportCongestionControlServer.cpp',
+  'src/RTC/CamelCongestionControlClient.cpp',
+
   'src/RTC/TransportTuple.cpp',
   'src/RTC/TrendCalculator.cpp',
   'src/RTC/UdpSocket.cpp',
