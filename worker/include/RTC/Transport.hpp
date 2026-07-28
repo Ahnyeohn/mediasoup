@@ -227,8 +227,8 @@ namespace RTC
 		void CheckNoDataProducer(const std::string& dataProducerId) const;
 		void CheckNoDataConsumer(const std::string& dataConsumerId) const;
 
-	// yeon: slack 기반 layering 
-	// 원래 private인데 임시로 public 사용
+		// yeon: slack 기반 layering
+		// 원래 private인데 임시로 public 사용
 	public:
 		void DistributeAvailableOutgoingBitrate();
 		void ComputeOutgoingDesiredBitrate(bool forceBitrate = false);
@@ -313,6 +313,10 @@ namespace RTC
 
 		/* Pure virtual methods inherited from RTC::TransportCongestionControlClient::Listener. */
 	public:
+		void ApplySelectedOutgoingBitrate(
+		  RTC::TransportCongestionControlClient::Bitrates& bitrates);
+		void ApplySelectedOutgoingBitrate(
+		  RTC::CamelCongestionControlClient::Bitrates& bitrates);
 		void OnTransportCongestionControlClientBitrates(
 		  RTC::TransportCongestionControlClient* tccClient,
 		  RTC::TransportCongestionControlClient::Bitrates& bitrates) override;
