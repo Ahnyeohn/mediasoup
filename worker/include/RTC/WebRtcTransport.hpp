@@ -14,11 +14,11 @@
 #include "RTC/UdpSocket.hpp"
 
 // yeon: deadline slack
+#include "RTC/FramePacketCsvWriter.hpp"
 #include "RTC/FrameRecord.hpp"
+#include "RTC/FrameRecordCsvWriter.hpp"
 #include "RTC/NetworkState.hpp"
 #include "RTC/SlackPredictor.hpp"
-#include "RTC/FrameRecordCsvWriter.hpp"
-#include "RTC/FramePacketCsvWriter.hpp"
 #include <vector>
 
 // yeon: (pacer 구현)
@@ -26,6 +26,9 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+
+// yeon: multi viewer
+#include <unordered_map>
 
 // -------------------------------------------------------------------
 // App message kind
@@ -354,28 +357,47 @@ namespace RTC
 		void OnRttUpdated(double rttMs) override;
 		void OnSlack(const uint8_t* msg, size_t len) override;
 		uint32_t GetAceBucketSizeBytes() const override;
-		
+
 	private:
 		// yeon: TokenBucketPacer을 하나만 두고 소유를 함부로 주지 못하게
 		std::unique_ptr<TokenBucketPacer> rtpPacer;
+
 		std::unique_ptr<RTC::SlackPredictor> slackPredictor;
-		bool predictFrameInit{ false };
-		uint32_t currentPredictFrameTimestamp{ 0 };
-		std::optional<double> currentPredictedSlack;
-		std::unordered_map<uint32_t, double> pendingPredictedSlackByFrame;
-		
+
+		// consumerId별 FrameRecordTable.
+		// 각 table 내부에서는 기존처럼 frameId만 key로 써도 됨.
+		std::unordered_map<std::string, std::shared_ptr<RTC::FrameRecordTable>> frameRecordTablesByConsumerId;
+
+		// 이 transport 안에서 RTP timestamp가 어느 consumer로 나갔는지 기록.
+		// 브라우저 telemetry에는 consumerId가 없으므로 OnSlack에서 이 map으로 찾음.
+		std::unordered_map<uint32_t, std::string> frameConsumerIdByRtpTimestamp;
+
+		// predicted slack도 consumerId + frameId 기준으로 관리.
+		std::unordered_map<std::string, std::unordered_map<uint32_t, double>> pendingPredictedSlackByConsumerFrame;
+
+		// 새 frame 감지도 consumer별로 관리.
+		std::unordered_map<std::string, bool> predictFrameInitByConsumerId;
+		std::unordered_map<std::string, uint32_t> currentPredictFrameTimestampByConsumerId;
+
 		// Helper: actual immediate send path (your existing code moved here)
 		void SendRtpPacketNow(
 		  RTC::Consumer* consumer, RTC::RtpPacket* packet, const RTC::Transport::onSendCallback* cb);
+
 		void PredictSlack(RTC::RtpPacket* packet);
+		void PredictSlack(RTC::Consumer* consumer, RTC::RtpPacket* packet);
+		FrameRecordTable* GetFrameRecordTableForConsumer(const std::string& consumerId);
 		//------// pacing으로 추가한 부분
 		// yeon: deadline slack
 	public:
 		std::unique_ptr<RTC::NetworkState> networkState;
-		//std::unique_ptr<RTC::FrameRecordTable> frameRecordTable;
+		// std::unique_ptr<RTC::FrameRecordTable> frameRecordTable;
 		std::shared_ptr<RTC::FrameRecordTable> frameRecordTable;
 		std::unique_ptr<RTC::FrameRecordCsvWriter> frameRecordCsvWriter;
 		std::unique_ptr<RTC::FramePacketCsvWriter> framePacketCsvWriter;
+
+		// yeon: multi viewer
+	private:
+		std::optional<double> currentPredictedSlack;
 	};
 
 } // namespace RTC

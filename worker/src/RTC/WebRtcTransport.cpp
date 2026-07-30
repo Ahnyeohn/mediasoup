@@ -624,6 +624,17 @@ static int GetVp8FrameType(const uint8_t* payload, size_t len)
 namespace RTC
 {
 	/* Static. */
+	FrameRecordTable* WebRtcTransport::GetFrameRecordTableForConsumer(const std::string& consumerId)
+	{
+		auto& table = this->frameRecordTablesByConsumerId[consumerId];
+
+		if (!table)
+		{
+			table = std::make_shared<RTC::FrameRecordTable>(5000);
+		}
+
+		return table.get();
+	}
 
 	static std::shared_ptr<RTC::FrameRecordTable> GetSharedFrameRecordTable()
 	{
@@ -1348,63 +1359,81 @@ namespace RTC
 		}
 
 		// yeon: slack 기반 layering (가장 단순한 코드)
-		// 현재 frameId는 RTP timestamp를 사용 중
-		const uint32_t frameId        = static_cast<uint32_t>(rtpTimestamp64);
-		const double slackMs          = static_cast<double>(decodeStartMs - receiveTimeMs);
-		const double decoding_latency = static_cast<double>(decodeFinishMs - decodeStartMs);
+		// 현재 frameId는 RTP timestamp를 사용 중.
+		const uint32_t frameId = static_cast<uint32_t>(rtpTimestamp64);
+
+		// slack = decodeStartMs - receiveTimeMs
+		const double slackMs = static_cast<double>(decodeStartMs - receiveTimeMs);
 		bool attached{ false };
 
-		const auto nowMs = DepLibUV::GetTimeMsInt64();
+		// 브라우저 telemetry에는 consumerId가 없다.
+		// SendRtpPacketNow()에서 저장해둔 frameId -> consumerId mapping으로 찾는다.
+		auto consumerIdIt = this->frameConsumerIdByRtpTimestamp.find(frameId);
 
-		bool slackLayerCapChanged = false;
-
-
-		// for (auto& kv : this->mapConsumers) // 이 for문 자체가 작동을 안함
-		// {	
-		// 	auto* consumer = kv.second;
-		// 	if (!consumer)
-		// 	{
-		// 		continue;
-		// 	}
-		// 	slackLayerCapChanged =
-		// 	  consumer->UpdateDecodeSlackLayerCap(slackMs, nowMs) || slackLayerCapChanged;
-		// }
-
-		if (slackLayerCapChanged)
-		{
-			MS_WARN_TAG(bwe, "decode slack layer cap changed, redistributing available outgoing bitrate");
-
-			DistributeAvailableOutgoingBitrate();
-			ComputeOutgoingDesiredBitrate();
-		}
-
-		if (this->frameRecordTable)
-		{
-			// this->frameRecordTable->AttachTimingAndDesiredTimes(
-			//   frameId, receiveTimeMs, decodeStartMs, decodeFinishMs);
-			this->frameRecordTable->AttachTimingAndDesiredTimes(
-			  frameId, receiveTimeMs, latestDecodeTimeMs, frameBufferInsertTimeMs, frameBufferExtractTimeMs, 
-			  decodeQueueInsertTimeMs, decodeQueueExtractTimeMs, decodeStartMs, decodeFinishMs,
-			  now, render_time, max_wait);
-			this->frameRecordTable->AttachPacketReceiveTimes(frameId, packetReceiveTimes);
-
-			attached = this->frameRecordTable->AttachSlack(frameId, slackMs);
-		}
-
-		if (!attached)
+		if (consumerIdIt == this->frameConsumerIdByRtpTimestamp.end())
 		{
 			MS_WARN_TAG(
 			  sctp,
-			  "[SLACK] no matching frame record for frameId:%" PRIu32 " slackMs:%.3f payload:%s",
+			  "[SLACK] no consumerId mapping for frameId:%" PRIu32 " slackMs:%.3f payload:%s",
 			  frameId,
 			  slackMs,
 			  text.c_str());
 			return;
 		}
 
-		if (attached && this->frameRecordTable && this->slackPredictor)
+		const std::string consumerId = consumerIdIt->second;
+
+		auto tableIt = this->frameRecordTablesByConsumerId.find(consumerId);
+
+		if (tableIt == this->frameRecordTablesByConsumerId.end() || !tableIt->second)
 		{
-			auto recordOpt = this->frameRecordTable->GetCompletedRecord(frameId);
+			MS_WARN_TAG(
+			  sctp,
+			  "[SLACK] no frame record table for consumerId:%s frameId:%" PRIu32 " slackMs:%.3f payload:%s",
+			  consumerId.c_str(),
+			  frameId,
+			  slackMs,
+			  text.c_str());
+			return;
+		}
+
+		auto* table = tableIt->second.get();
+
+		table->AttachTimingAndDesiredTimes(
+		  frameId,
+		  receiveTimeMs,
+		  latestDecodeTimeMs,
+		  frameBufferInsertTimeMs,
+		  frameBufferExtractTimeMs,
+		  decodeQueueInsertTimeMs,
+		  decodeQueueExtractTimeMs,
+		  decodeStartMs,
+		  decodeFinishMs,
+		  now,
+		  render_time,
+		  max_wait);
+
+		table->AttachPacketReceiveTimes(frameId, packetReceiveTimes);
+
+		attached = table->AttachSlack(frameId, slackMs);
+
+		if (!attached)
+		{
+			MS_WARN_TAG(
+			  sctp,
+			  "[SLACK] no matching frame record for consumerId:%s frameId:%" PRIu32
+			  " slackMs:%.3f payload:%s",
+			  consumerId.c_str(),
+			  frameId,
+			  slackMs,
+			  text.c_str());
+			return;
+		}
+
+		if (this->slackPredictor)
+		{
+			auto recordOpt = table->GetCompletedRecord(frameId);
+
 			if (recordOpt.has_value())
 			{
 				const auto& rec = recordOpt.value();
@@ -1422,16 +1451,23 @@ namespace RTC
 				sample.slackMs                    = rec.slackMs;
 
 				this->slackPredictor->AddSample(sample);
+
 				if (rec.hasReceiveTimeMs && rec.hasDesiredReceiveTimeMs && rec.hasReceiveSlackMs && this->frameRecordCsvWriter)
 				{
 					this->frameRecordCsvWriter->WriteRecord(rec);
 				}
+
 				if (this->framePacketCsvWriter && !packetReceiveTimes.empty())
 				{
-					this->framePacketCsvWriter->WritePacketReceiveTimes(frameId, packetReceiveTimes);
+					this->framePacketCsvWriter->WritePacketReceiveTimes(
+					  rec.transportId, rec.consumerId, rec.producerId, frameId, packetReceiveTimes);
 				}
 			}
 		}
+
+		// 더 이상 필요 없는 frameId -> consumerId mapping 제거.
+		// 이걸 안 하면 장시간 실험에서 map이 계속 커진다.
+		this->frameConsumerIdByRtpTimestamp.erase(frameId);
 	} // 지금 네트워크 지표는 Slack과 더불어, 그때의 네트워크 상황이 수집되고 있음
 	// 즉, 계산된 네트워크 Slack과 프레임 아이디인 Timestamp가 과거 데이터와 합체된다.
 	// 이제 이걸 사용해서 slack을 예측하는 코드를 개발하면 된다.
@@ -1447,9 +1483,9 @@ namespace RTC
 	  : RTC::Transport::Transport(shared, id, listener, options->base())
 	{
 		MS_TRACE();
-		this->networkState     = std::make_unique<RTC::NetworkState>();
-		this->frameRecordTable = std::make_unique<RTC::FrameRecordTable>(5000);
-		this->slackPredictor   = std::make_unique<RTC::SlackPredictor>();
+		this->networkState = std::make_unique<RTC::NetworkState>();
+		// this->frameRecordTable = std::make_unique<RTC::FrameRecordTable>(5000);
+		this->slackPredictor = std::make_unique<RTC::SlackPredictor>();
 		try
 		{
 			const auto* listenIndividual = options->listen_as<FBS::WebRtcTransport::ListenIndividual>();
@@ -1710,8 +1746,11 @@ namespace RTC
 		// yeon: deadline slack
 		this->networkState = std::make_unique<RTC::NetworkState>();
 		// this->frameRecordTable = std::make_unique<RTC::FrameRecordTable>(5000); // 5000개만 저장하기
-		this->frameRecordTable = GetSharedFrameRecordTable();
-		this->slackPredictor   = std::make_unique<RTC::SlackPredictor>();
+
+		// multi viewer를 지원하기 위해 비활성화 혹은 제거
+		// this->frameRecordTable = GetSharedFrameRecordTable();
+
+		this->slackPredictor = std::make_unique<RTC::SlackPredictor>();
 
 		if (ispacing)
 		{
@@ -2404,8 +2443,13 @@ namespace RTC
 	// }
 
 	// yeon : pacing 구현을 위한 새로운 SendRtpPacket 정의
-	void WebRtcTransport::PredictSlack(RTC::RtpPacket* packet)
+	void WebRtcTransport::PredictSlack(RTC::Consumer* consumer, RTC::RtpPacket* packet)
 	{
+		if (!consumer || !packet || !this->networkState)
+		{
+			return;
+		}
+
 		RTC::SlackFeature current;
 		auto snapshot = this->networkState->GetSnapshot();
 
@@ -2414,40 +2458,23 @@ namespace RTC
 		current.aceQueueBytes      = snapshot.aceQueueBytes;
 		current.pacingBacklogBytes = snapshot.pacingBacklogBytes;
 
-		// 초기 버전: frame 전체 크기를 아직 모르므로 packet size를 근사로 사용
+		// 초기 버전: frame 전체 크기를 아직 모르므로 첫 packet size를 근사로 사용.
 		current.frameSizeBytes = static_cast<double>(packet->GetSize());
-		// current.packetCount    = 1.0;
-		// current.temporalLayer  = 0.0;
-		// current.isKeyFrame     = 0.0;
 
 		this->currentPredictedSlack.reset();
 
 		if (this->slackPredictor)
 		{
 			this->currentPredictedSlack = this->slackPredictor->PredictSlackMs(current);
-			const uint32_t frameId      = packet->GetTimestamp();
+
 			if (this->currentPredictedSlack.has_value())
 			{
-				this->pendingPredictedSlackByFrame[frameId] = this->currentPredictedSlack.value();
-			}
-			// if (this->currentPredictedSlack.has_value())
-			// {
-			// 	// MS_ERROR_STD(
-			// 	//   "[SLACK-PREDICT] frame ts:%" PRIu32 " predicted slack: %.3f ms",
-			// 	//   ts,
-			// 	//   this->currentPredictedSlack.value());
+				const std::string& consumerId = consumer->id;
+				const uint32_t frameId        = packet->GetTimestamp();
 
-			// 	const uint32_t frameId = packet->GetTimestamp();
-			// 	this->frameRecordTable->AttachPredictedSlack(frameId,
-			// this->currentPredictedSlack.value());
-			// }
-			// else
-			// {
-			// 	double heuristicScore = this->slackPredictor->PredictHeuristicSlackScore(current);
-			// 	// MS_ERROR_STD(
-			// 	//   "[SLACK-PREDICT] frame ts:%" PRIu32 " fallback heuristic score: %.3f", ts,
-			// heuristicScore);
-			// }
+				this->pendingPredictedSlackByConsumerFrame[consumerId][frameId] =
+				  this->currentPredictedSlack.value();
+			}
 		}
 	}
 
@@ -2456,37 +2483,50 @@ namespace RTC
 	{
 		MS_TRACE();
 
-		// 항상 frame 관측은 해둠
+		if (!consumer || !packet)
+		{
+			if (cb)
+			{
+				(*cb)(false);
+				delete cb;
+			}
+
+			return;
+		}
+
+		// 항상 frame 관측은 해둠.
 		if (this->rtpPacer)
 		{
 			this->rtpPacer->ObservePacketForFrame(packet);
 		}
 
-		// ===== 새 프레임의 첫 패킷인지 확인 =====
-		const uint32_t ts = packet->GetTimestamp();
-		bool isNewFrame   = false;
+		const std::string& consumerId = consumer->id;
+		const uint32_t ts             = packet->GetTimestamp();
 
-		if (!this->predictFrameInit)
+		// ===== consumer별 새 프레임 첫 패킷인지 확인 =====
+		bool& predictFrameInit = this->predictFrameInitByConsumerId[consumerId];
+		uint32_t& currentPredictFrameTimestamp =
+		  this->currentPredictFrameTimestampByConsumerId[consumerId];
+
+		bool isNewFrame = false;
+
+		if (!predictFrameInit)
 		{
-			this->predictFrameInit             = true;
-			this->currentPredictFrameTimestamp = ts;
-			isNewFrame                         = true;
+			predictFrameInit             = true;
+			currentPredictFrameTimestamp = ts;
+			isNewFrame                   = true;
 		}
-		else if (this->currentPredictFrameTimestamp != ts)
+		else if (currentPredictFrameTimestamp != ts)
 		{
-			this->currentPredictFrameTimestamp = ts;
-			isNewFrame                         = true;
+			currentPredictFrameTimestamp = ts;
+			isNewFrame                   = true;
 		}
 
-		// ===== 새 프레임일 때만 이 패킷을 보내기 전에 slack을 예측 ====
-		// 현재는 slack 예측이 아니라 최근 slack 데이터를 사용해서 긴급성을 판단
+		// ===== 새 프레임일 때만 이 패킷을 보내기 전에 slack 예측 =====
 		if (isNewFrame)
 		{
-			PredictSlack(packet);
+			PredictSlack(consumer, packet);
 		}
-		// TODO:
-		// 여기서 currentPredictedSlack 또는 heuristic score를 바탕으로
-		// pacer parameter를 조정할 수 있음
 
 		if (this->rtpPacer && ispacing)
 		{
@@ -2561,12 +2601,22 @@ namespace RTC
 		this->iceServer->GetSelectedTuple()->Send(data, len, cb);
 
 		// ---- frame record store begin ----
-		if (this->frameRecordTable && this->networkState)
+		if (consumer && consumer->GetKind() == RTC::Media::Kind::VIDEO && this->networkState)
 		{
+			const std::string& transportId = this->id;
+			const std::string& consumerId  = consumer->id;
+			const std::string& producerId  = consumer->producerId;
+
 			const uint32_t frameId         = packet->GetTimestamp();
 			const bool isLastPacketOfFrame = packet->HasMarker();
 			const size_t packetSize        = packet->GetSize();
 			const uint64_t nowMs           = DepLibUV::GetTimeMs();
+
+			// 브라우저 telemetry에는 consumerId가 없으므로,
+			// SFU가 RTP send 시점에 rtpTimestamp -> consumerId 매핑을 저장한다.
+			this->frameConsumerIdByRtpTimestamp[frameId] = consumerId;
+
+			auto* table = this->GetFrameRecordTableForConsumer(consumerId);
 
 			int frameType             = -1; // 1=key, 0=inter, -1=unknown
 			int temporalLayer         = -1; // -1=unknown
@@ -2575,12 +2625,9 @@ namespace RTC
 			int targetSpatialLayer    = -1;
 			int preferredSpatialLayer = -1;
 
-			if (consumer)
-			{
-				currentSpatialLayer   = consumer->GetCurrentSpatialLayer();
-				targetSpatialLayer    = consumer->GetTargetSpatialLayer();
-				preferredSpatialLayer = consumer->GetPreferredSpatialLayer();
-			}
+			currentSpatialLayer   = consumer->GetCurrentSpatialLayer();
+			targetSpatialLayer    = consumer->GetTargetSpatialLayer();
+			preferredSpatialLayer = consumer->GetPreferredSpatialLayer();
 
 			if (packet->GetPayload() && packet->GetPayloadLength() > 0)
 			{
@@ -2600,13 +2647,12 @@ namespace RTC
 				snapshot.pacingBucketSizeBytes = this->rtpPacer->GetBucketSize();
 			}
 
-			// yeon: Camel burst length snapshot.
-			// frame record는 snapshot을 복사해서 저장하므로 여기서 채워야 함.
-			snapshot.camelBurstLengthBytes    = GetCamelBurstLengthBytes();
-			snapshot.gccAvailableBitrateBps   = GetGccAvailableOutgoingBitrate();
-			snapshot.camelAvailableBitrateBps = GetCamelAvailableOutgoingBitrate();
+			const bool pacingEnabled = ispacing;
 
-			this->frameRecordTable->OnPacketSent(
+			table->OnPacketSent(
+			  transportId,
+			  consumerId,
+			  producerId,
 			  frameId,
 			  packetSize,
 			  isLastPacketOfFrame,
@@ -2616,30 +2662,21 @@ namespace RTC
 			  currentSpatialLayer,
 			  targetSpatialLayer,
 			  preferredSpatialLayer,
-			  ispacing,
+			  pacingEnabled,
 			  nowMs,
 			  snapshot);
 
-			// if (this->currentPredictedSlack.has_value())
-			// {
-			// 	// MS_ERROR_STD(
-			// 	//   "[SLACK-PREDICT] frame ts:%" PRIu32 " predicted slack: %.3f ms",
-			// 	//   ts,
-			// 	//   this->currentPredictedSlack.value());
-
-			// 	const uint32_t frameId = packet->GetTimestamp();
-			// 	this->frameRecordTable->AttachPredictedSlack(frameId, this->currentPredictedSlack.value());
-			// }
 			if (isLastPacketOfFrame)
 			{
-				auto it = this->pendingPredictedSlackByFrame.find(frameId);
-				if (it != this->pendingPredictedSlackByFrame.end())
+				auto& pending = this->pendingPredictedSlackByConsumerFrame[consumerId];
+				auto it       = pending.find(frameId);
+
+				if (it != pending.end())
 				{
-					this->frameRecordTable->AttachPredictedSlack(frameId, it->second);
-					this->pendingPredictedSlackByFrame.erase(it);
+					table->AttachPredictedSlack(frameId, it->second);
+					pending.erase(it);
 				}
 			}
-			// 여기에다가 이제 넣기
 		}
 		// ---- frame record store end ----
 

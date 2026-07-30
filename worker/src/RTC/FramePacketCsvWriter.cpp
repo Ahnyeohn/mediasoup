@@ -31,7 +31,7 @@ namespace RTC
 
 		if (fileSize == 0)
 		{
-			this->out << "frameId,sequenceNumber,receiveTimeMs\n";
+			this->out << "transportId,consumerId,producerId,frameId,sequenceNumber,receiveTimeMs\n";
 			this->out.flush();
 		}
 
@@ -39,7 +39,11 @@ namespace RTC
 	}
 
 	void FramePacketCsvWriter::WritePacketReceiveTimes(
-	  uint32_t frameId, const std::vector<PacketReceiveInfo>& packetReceiveTimes)
+	  const std::string& transportId,
+	  const std::string& consumerId,
+	  const std::string& producerId,
+	  uint32_t frameId,
+	  const std::vector<PacketReceiveInfo>& packetReceiveTimes)
 	{
 		std::lock_guard<std::mutex> lock(this->mutex);
 
@@ -58,6 +62,9 @@ namespace RTC
 		for (const auto& packet : packetReceiveTimes)
 		{
 			this->out
+			  << transportId << ","
+			  << consumerId << ","
+			  << producerId << ","
 			  << frameId << ","
 			  << packet.sequenceNumber << ","
 			  << packet.receiveTimeMs << "\n";

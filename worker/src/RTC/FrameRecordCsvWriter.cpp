@@ -32,7 +32,10 @@ namespace RTC
 
 		if (fileSize == 0)
 		{
-			this->out << "frameId, "
+			this->out << "transportId,"
+			          << "consumerId,"
+			          << "producerId,"
+			          << "frameId, "
 			          //   << "firstPacketSentAtMs,"
 			          //   << "lastPacketSentAtMs,"
 			          //   << "frameSizeBytes,"
@@ -104,13 +107,16 @@ namespace RTC
 		                     : NAN;
 
 		this->out
-		  << record.frameId
-		  << ", "
+		  << record.transportId << "," 
+		  << record.consumerId << "," 
+		  << record.producerId << "," 
+		  << record.frameId << ", "
 		  //   << record.firstPacketSentAtMs << ","
 		  //   << record.lastPacketSentAtMs << ","
 		  //   << record.frameSizeBytes << ","
 		  //   << record.packetCount << ","
-		  << (record.isKeyFrame ? 1 : 0) << ", "
+		  << (record.isKeyFrame ? 1 : 0)
+		  << ", "
 		  //   << static_cast<uint32_t>(record.temporalLayer) << ","
 
 		  //<< static_cast<uint32_t>(record.SpatialLayer) << ","
@@ -118,9 +124,9 @@ namespace RTC
 		  << record.preferredSpatialLayer << ", "
 
 		  << record.network.rttMs << ", " << record.network.lossRate << ", "
-		  << record.network.availableBitratebps << ", " 
-		  << record.network.gccAvailableBitrateBps << ", "
-		  << record.network.camelAvailableBitrateBps << ", "
+		  << record.network.availableBitratebps << ", " << record.network.gccAvailableBitrateBps << ", "
+		  << record.network.camelAvailableBitrateBps
+		  << ", "
 		  //  << predicted << ", "
 		  << (record.hasReceiveTimeMs ? std::to_string(record.receiveTimeMs) : "") << ", "
 		  << (record.hasLatestDecodeTimeMs ? std::to_string(record.latestDecodeTimeMs) : "") << ", "

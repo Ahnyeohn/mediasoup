@@ -7,6 +7,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <string>
+
 #include "RTC/NetworkState.hpp"
 
 namespace RTC
@@ -18,6 +20,11 @@ namespace RTC
 	};
 	struct FrameRecord
 	{
+		// multi viewer 지원을 위한 식별자
+		std::string transportId;
+		std::string consumerId;
+		std::string producerId;
+
 		uint32_t frameId{ 0 }; // 추천: RTP timestamp 사용
 		uint64_t firstPacketSentAtMs{ 0 };
 		uint64_t lastPacketSentAtMs{ 0 };
@@ -125,6 +132,11 @@ namespace RTC
 
 	struct FrameBuilder
 	{
+		// multi viewer 지원을 위한 식별자
+		std::string transportId;
+		std::string consumerId;
+		std::string producerId;
+
 		uint32_t frameId{ 0 };
 		uint64_t firstPacketSentAtMs{ 0 };
 		uint64_t lastPacketSentAtMs{ 0 };
@@ -160,6 +172,9 @@ namespace RTC
 	public:
 		// 같은 frameId의 패킷들이 들어올 때마다 호출.
 		void OnPacketSent(
+		  const std::string& transportId,
+		  const std::string& consumerId,
+		  const std::string& producerId,
 		  uint32_t frameId,
 		  size_t packetSize,
 		  bool isLastPacketOfFrame,
