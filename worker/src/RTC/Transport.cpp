@@ -34,32 +34,6 @@
 #include <iomanip>
 #include <unordered_map>
 
-static bool ContainsBytes(const uint8_t* data, size_t len, const char* needle)
-{
-	const size_t needleLen = std::strlen(needle);
-
-	if (!data || needleLen == 0 || len < needleLen)
-	{
-		return false;
-	}
-
-	for (size_t i = 0; i <= len - needleLen; ++i)
-	{
-		if (std::memcmp(data + i, needle, needleLen) == 0)
-		{
-			return true;
-		}
-	}
-
-	return false;
-}
-
-static bool LooksLikeFrameTelemetryPayload(const uint8_t* msg, size_t len, uint32_t /*ppid*/)
-{
-	return ContainsBytes(msg, len, "frameId") || ContainsBytes(msg, len, "rtpTimestamp") ||
-	       ContainsBytes(msg, len, "decode") || ContainsBytes(msg, len, "slack");
-}
-
 namespace RTC
 {
 	static const size_t DefaultSctpSendBufferSize{ 262144 }; // 2^18.
@@ -2990,7 +2964,7 @@ namespace RTC
 	inline void Transport::OnConsumerSendRtpPacket(RTC::Consumer* consumer, RTC::RtpPacket* packet)
 	{
 		MS_TRACE();
-		MS_ERROR_STD();
+		// MS_ERROR_STD();
 
 #ifdef MS_RTC_LOGGER_RTP
 		packet->logger.sendTransportId = this->id;
@@ -3531,14 +3505,25 @@ namespace RTC
 		}
 	}
 
-	void Transport::ApplySelectedOutgoingBitrate(RTC::TransportCongestionControlClient::Bitrates& bitrates)
+	void Transport::ApplySelectedOutgoingBitrate(
+	  RTC::TransportCongestionControlClient::Bitrates& bitrates)
 	{
-		const uint32_t availableBitrate = GetSelectedAvailableOutgoingBitrate();
-
 		DistributeAvailableOutgoingBitrate();
 		ComputeOutgoingDesiredBitrate();
-		// May emit 'trace' event.
+
+		// GCC Bitrates contains all fields required by the existing BWE trace event.
 		EmitTraceEventBweType(bitrates);
+
+		OnAvailableBitrateChanged(GetSelectedAvailableOutgoingBitrate());
+	}
+
+	void Transport::ApplySelectedOutgoingBitrate(
+	  RTC::CamelCongestionControlClient::Bitrates& /*bitrates*/)
+	{
+		DistributeAvailableOutgoingBitrate();
+		ComputeOutgoingDesiredBitrate();
+
+		// EmitTraceEventBweType() currently accepts GCC Bitrates only.
 		OnAvailableBitrateChanged(GetSelectedAvailableOutgoingBitrate());
 	}
 
@@ -3565,7 +3550,7 @@ namespace RTC
 
 		if (this->outgoingBweAlgorithm == OutgoingBweAlgorithm::Camel)
 		{
-			ApplySelectedOutgoingBitrate();
+			ApplySelectedOutgoingBitrate(bitrates);
 		}
 	}
 

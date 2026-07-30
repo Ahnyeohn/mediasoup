@@ -598,7 +598,7 @@ static int GetVp8FrameType(const uint8_t* payload, size_t len)
 			{
 				return -1;
 			}
-			pNos++;
+			pos++;
 		}
 
 		if (t || k)
@@ -1214,7 +1214,7 @@ namespace RTC
 			this->networkState->UpdateLossRate(loss, nowMs);
 		}
 		// lossDetected = loss; // setter 함수 필요 private
-		if (!this->rtpPacer || ispacing.load() == false)
+		if (!this->rtpPacer || ispacing == false)
 		{
 			return;
 		}
@@ -1231,7 +1231,7 @@ namespace RTC
 			this->networkState->UpdateRttMs(rttMs, nowMs);
 		}
 
-		if (!this->rtpPacer || ispacing.load() == false)
+		if (!this->rtpPacer || ispacing == false)
 		{
 			return;
 		}
