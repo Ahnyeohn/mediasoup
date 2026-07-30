@@ -8,6 +8,9 @@ namespace RTC
 	}
 
 	void FrameRecordTable::OnPacketSent(
+	  const std::string& transportId,
+	  const std::string& consumerId,
+	  const std::string& producerId,
 	  uint32_t frameId,
 	  size_t packetSize,
 	  bool isLastPacketOfFrame,
@@ -27,6 +30,10 @@ namespace RTC
 
 		if (!builder.initialized)
 		{
+			builder.transportId = transportId;
+			builder.consumerId  = consumerId;
+			builder.producerId  = producerId;
+
 			builder.frameId             = frameId;
 			builder.firstPacketSentAtMs = nowMs;
 			builder.initialized         = true;
@@ -58,9 +65,7 @@ namespace RTC
 			builder.hasValidTemporalLayer = true;
 		}
 
-		// spatial은 지금처럼 마지막 값 유지해도 큰 문제는 적음
-		// consumer 상태 layer도 최신 값 유지
-		// setPreferredLayers / target 전환 직후를 보기 위해 마지막 값으로 덮어씀
+		// consumer 상태 layer는 최신 값 유지
 		builder.currentSpatialLayer   = currentSpatialLayer;
 		builder.targetSpatialLayer    = targetSpatialLayer;
 		builder.preferredSpatialLayer = preferredSpatialLayer;
@@ -85,6 +90,11 @@ namespace RTC
 		const auto& builder = it->second;
 
 		FrameRecord record;
+
+		record.transportId = builder.transportId;
+		record.consumerId  = builder.consumerId;
+		record.producerId  = builder.producerId;
+
 		record.frameId             = builder.frameId;
 		record.firstPacketSentAtMs = builder.firstPacketSentAtMs;
 		record.lastPacketSentAtMs  = builder.lastPacketSentAtMs;
@@ -93,6 +103,7 @@ namespace RTC
 		record.isKeyFrame          = (builder.frameType == 1);
 		record.temporalLayer =
 		  (builder.temporalLayer >= 0) ? static_cast<uint8_t>(builder.temporalLayer) : 0;
+
 		record.SpatialLayer          = builder.SpatialLayer;
 		record.currentSpatialLayer   = builder.currentSpatialLayer;
 		record.targetSpatialLayer    = builder.targetSpatialLayer;

@@ -10,7 +10,6 @@
 
 namespace RTC
 {
-
 	class FramePacketCsvWriter
 	{
 	public:
@@ -19,7 +18,11 @@ namespace RTC
 
 	public:
 		void WritePacketReceiveTimes(
-		  uint32_t frameId, const std::vector<PacketReceiveInfo>& packetReceiveTimes);
+		  const std::string& transportId,
+		  const std::string& consumerId,
+		  const std::string& producerId,
+		  uint32_t frameId,
+		  const std::vector<PacketReceiveInfo>& packetReceiveTimes);
 
 	private:
 		void WriteHeaderIfNeeded();
