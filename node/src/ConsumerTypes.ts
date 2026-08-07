@@ -58,6 +58,15 @@ export type ConsumerOptions<ConsumerAppData extends AppData = AppData> = {
 	 */
 	enableRtx?: boolean;
 
+	// yeon: fec
+	/**
+	 * Whether this video Consumer should generate FlexFEC repair packets.
+	 *
+	 * FlexFEC is only enabled for video Consumers and non-pipe transports.
+	 * Default false.
+	 */
+	enableFlexFec?: boolean;
+
 	/**
 	 * Whether this Consumer should ignore DTX packets (only valid for Opus codec).
 	 * If set, DTX packets are not forwarded to the remote Consumer.

@@ -325,11 +325,11 @@ export function generateRouterRtpCapabilities(
 	const dependencyDescriptorHeaderExtensionForPipeConsumer:
 		| RtpHeaderExtension
 		| undefined = supportedRtpCapabilities.headerExtensions!.find(
-		headerExtension =>
-			headerExtension.uri ===
+			headerExtension =>
+				headerExtension.uri ===
 				'https://aomediacodec.github.io/av1-rtp-spec/#dependency-descriptor-rtp-header-extension' &&
-			headerExtension.direction !== 'sendrecv'
-	);
+				headerExtension.direction !== 'sendrecv'
+		);
 
 	if (dependencyDescriptorHeaderExtensionForPipeConsumer) {
 		cache.dependencyDescriptorHeaderExtensionParametersForPipeConsumer = {
@@ -410,8 +410,7 @@ export function getProducerRtpParametersMapping(
 
 		if (!associatedCapRtxCodec) {
 			throw new UnsupportedError(
-				`no RTX codec for capability codec PT ${
-					capMediaCodec!.preferredPayloadType
+				`no RTX codec for capability codec PT ${capMediaCodec!.preferredPayloadType
 				}`
 			);
 		}
@@ -597,11 +596,13 @@ export function getConsumerRtpParameters({
 	remoteRtpCapabilities,
 	pipe,
 	enableRtx,
+	enableFlexFec = false, // yeon: fec
 }: {
 	consumableRtpParameters: RtpParameters;
 	remoteRtpCapabilities: RtpCapabilities;
 	pipe: boolean;
 	enableRtx: boolean;
+	enableFlexFec?: boolean;
 }): RtpParameters {
 	const consumerParams: RtpParameters = {
 		codecs: [],
@@ -707,6 +708,97 @@ export function getConsumerRtpParameters({
 		}
 	}
 
+
+	// yeon: fec
+	let flexFecEnabled = false;
+
+	if (enableFlexFec && !pipe) {
+		/*
+		 * 첫 번째 실제 미디어 codec을 찾는다.
+		 *
+		 * 현재 consumerParams.codecs는 일반적으로:
+		 *   VP8/H264/VP9
+		 *   RTX
+		 * 순서다.
+		 */
+		const mediaCodec = consumerParams.codecs.find(
+			codec => !isRtxCodec(codec)
+		);
+
+		const isVideo =
+			mediaCodec?.mimeType
+				.toLowerCase()
+				.startsWith('video/') === true;
+
+		if (isVideo) {
+			/*
+			 * 이미 사용 중인 RTP Payload Type과 겹치지 않는
+			 * 동적 PT를 하나 선택한다.
+			 */
+			const usedPayloadTypes = new Set<number>(
+				consumerParams.codecs.map(
+					codec => codec.payloadType
+				)
+			);
+
+			const flexFecPayloadType = [
+				118,
+				119,
+				120,
+				121,
+				122,
+				123,
+				124,
+				125,
+				126,
+				127,
+				96,
+				97,
+				98,
+				99,
+				100,
+				101,
+				102,
+				103,
+				104,
+				105,
+				106,
+				107,
+				108,
+				109,
+				110,
+				111,
+				112,
+				113,
+				114,
+				115,
+				116,
+				117
+			].find(
+				payloadType =>
+					!usedPayloadTypes.has(payloadType)
+			);
+
+			if (flexFecPayloadType === undefined) {
+				throw new Error(
+					'cannot allocate FlexFEC payload type'
+				);
+			}
+
+			consumerParams.codecs.push({
+				mimeType: 'video/flexfec-03',
+				payloadType: flexFecPayloadType,
+				clockRate: 90000,
+				parameters: {
+					'repair-window': 10000000
+				},
+				rtcpFeedback: []
+			});
+
+			flexFecEnabled = true;
+		}
+	}
+
 	if (!pipe) {
 		const consumerEncoding: RtpEncodingParameters = {
 			ssrc: utils.generateRandomNumber(),
@@ -714,6 +806,11 @@ export function getConsumerRtpParameters({
 
 		if (rtxSupported) {
 			consumerEncoding.rtx = { ssrc: consumerEncoding.ssrc! + 1 };
+		}
+
+		// yeon: fec
+		if (flexFecEnabled) {
+			consumerEncoding.flexfec = { ssrc: consumerEncoding.ssrc! + 2 };
 		}
 
 		// If any of the consumableRtpParameters.encodings has scalabilityMode,
@@ -730,9 +827,8 @@ export function getConsumerRtpParameters({
 		if (consumableRtpParameters.encodings!.length > 1) {
 			const { temporalLayers } = parseScalabilityMode(scalabilityMode);
 
-			scalabilityMode = `L${
-				consumableRtpParameters.encodings!.length
-			}T${temporalLayers}`;
+			scalabilityMode = `L${consumableRtpParameters.encodings!.length
+				}T${temporalLayers}`;
 		}
 
 		if (scalabilityMode) {
@@ -828,9 +924,9 @@ export function getPipeConsumerRtpParameters({
 			ext =>
 				ext.uri !== 'urn:ietf:params:rtp-hdrext:sdes:mid' &&
 				ext.uri !==
-					'http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time' &&
+				'http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time' &&
 				ext.uri !==
-					'http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01'
+				'http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01'
 		);
 
 	// TODO: Remove this if we switch to 'sendrecv' in Dependency-Descriptor header
@@ -1318,6 +1414,19 @@ function validateRtpEncodingParameters(encoding: RtpEncodingParameters): void {
 		// RTX ssrc is mandatory if rtx is present.
 		if (typeof encoding.rtx.ssrc !== 'number') {
 			throw new TypeError('missing encoding.rtx.ssrc');
+		}
+	}
+
+	// flexfec is optional.
+	// yeon: fec
+	if (encoding.flexfec && typeof encoding.flexfec !== 'object') {
+		throw new TypeError('invalid encoding.flexfec');
+	} else if (encoding.flexfec) {
+		// FlexFEC SSRC is mandatory if flexfec is present.
+		if (typeof encoding.flexfec.ssrc !== 'number') {
+			throw new TypeError(
+				'missing encoding.flexfec.ssrc'
+			);
 		}
 	}
 

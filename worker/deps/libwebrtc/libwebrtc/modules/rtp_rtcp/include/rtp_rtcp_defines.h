@@ -20,7 +20,16 @@
 #include <list>
 #include <vector>
 
+#define RTCP_CNAME_SIZE 256
+
+#ifndef IP_PACKET_SIZE
+#define IP_PACKET_SIZE 1500
+#endif
+
 namespace webrtc {
+	// yeon: fec
+	// Minimum RTP header size in bytes.
+	const uint8_t kRtpHeaderSize = 12;
 namespace rtcp {
 class TransportFeedback;
 }

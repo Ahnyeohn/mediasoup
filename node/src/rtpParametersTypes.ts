@@ -297,6 +297,9 @@ export type RtpEncodingParameters = {
 	 */
 	rtx?: { ssrc: number };
 
+	// yeon: FEC
+	flexfec?: { ssrc: number;};
+
 	/**
 	 * It indicates whether discontinuous RTP transmission will be used. Useful
 	 * for audio (if the codec supports it) and for video screen sharing (when

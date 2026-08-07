@@ -27,6 +27,20 @@ libwebrtc_sources = [
   'libwebrtc/modules/remote_bitrate_estimator/bwe_defines.cc',
   'libwebrtc/modules/remote_bitrate_estimator/remote_bitrate_estimator_abs_send_time.cc',
   'libwebrtc/modules/rtp_rtcp/include/rtp_rtcp_defines.cc',
+
+  # yeon: fec
+  # FlexFEC / Forward Error Correction.
+  'libwebrtc/modules/rtp_rtcp/source/fec_private_tables_bursty.cc',
+  'libwebrtc/modules/rtp_rtcp/source/fec_private_tables_random.cc',
+  'libwebrtc/modules/rtp_rtcp/source/flexfec_header_reader_writer.cc',
+  'libwebrtc/modules/rtp_rtcp/source/forward_error_correction.cc',
+  'libwebrtc/modules/rtp_rtcp/source/forward_error_correction_internal.cc',
+  'libwebrtc/modules/rtp_rtcp/source/ulpfec_header_reader_writer.cc',
+
+  # yeon: fec
+  # Dependencies required by the imported M77 FEC implementation.
+  'libwebrtc/rtc_base/checks.cc',
+
   'libwebrtc/modules/bitrate_controller/send_side_bandwidth_estimation.cc',
   'libwebrtc/modules/bitrate_controller/loss_based_bandwidth_estimation.cc',
   'libwebrtc/modules/congestion_controller/goog_cc/goog_cc_network_control.cc',
@@ -55,6 +69,11 @@ local_include_directories = declare_dependency(
   include_directories: include_directories('libwebrtc')
 )
 
+# yeon: fec 전용 컴파일 정의.
+libwebrtc_cpp_args = cpp_args + [
+  '-DWEBRTC_POSIX',
+]
+
 libwebrtc = library(
   'libwebrtc',
   libwebrtc_sources,
@@ -67,7 +86,9 @@ libwebrtc = library(
     libuv_proj.get_variable('libuv_dep'),
   ],
   include_directories: libwebrtc_include_directories,
-  cpp_args: cpp_args,
+  # yeon: fec
+  # cpp_args: cpp_args,
+  cpp_args: libwebrtc_cpp_args,
 )
 
 libwebrtc_dep = declare_dependency(

@@ -10,6 +10,8 @@
 #include <cmath>
 #include <vector>
 
+#include <inttypes.h>
+
 static inline double NowEpochMs()
 {
 	using namespace std::chrono;
@@ -74,6 +76,12 @@ namespace RTC
 			else if (encoding.hasRtx && encoding.rtx.ssrc == 0)
 			{
 				MS_THROW_TYPE_ERROR("invalid encoding in rtpParameters (missing rtx.ssrc)");
+			}
+			else if (encoding.hasFlexFec && encoding.flexfec.ssrc == 0) // yeon: fec
+			{
+				MS_THROW_TYPE_ERROR(
+				  "invalid encoding in rtpParameters "
+				  "(missing flexfec.ssrc)");
 			}
 		}
 
@@ -174,6 +182,22 @@ namespace RTC
 			if (encoding.hasRtx)
 			{
 				this->rtxSsrcs.push_back(encoding.rtx.ssrc);
+			}
+		}
+
+		// yeon: fec
+		// Log FlexFEC repair SSRCs.
+		for (auto& encoding : this->rtpParameters.encodings)
+		{
+			if (encoding.hasFlexFec)
+			{
+				MS_WARN_TAG(
+				  rtp,
+				  "[FlexFEC] Consumer parsed repair SSRC "
+				  "[consumerId:%s, mediaSsrc:%" PRIu32 ", flexfecSsrc:%" PRIu32 "]",
+				  this->id.c_str(),
+				  encoding.ssrc,
+				  encoding.flexfec.ssrc);
 			}
 		}
 
@@ -663,7 +687,7 @@ namespace RTC
 	bool Consumer::UpdateDecodeSlackLayerCap(double decodeSlackNominalMs, int64_t nowMs)
 	{
 		MS_TRACE();
-		
+
 		const int8_t currentSpatialLayer = GetCurrentSpatialLayer();
 
 		if (currentSpatialLayer < 0)

@@ -24,6 +24,8 @@ import {
 	RtpHeaderExtensionUri as FbsRtpHeaderExtensionUri,
 	RtpParameters as FbsRtpParameters,
 	Rtx as FbsRtx,
+	// yeon: fec
+	FlexFec as FbsFlexFec,
 	Value as FbsValue,
 } from './fbs/rtp-parameters';
 
@@ -149,6 +151,17 @@ export function serializeRtpEncodingParameters(
 			rtxOffset = FbsRtx.createRtx(builder, encoding.rtx.ssrc);
 		}
 
+		// Prepare FlexFEC.
+		// yeon: fec
+		let flexfecOffset: number | undefined;
+
+		if (encoding.flexfec) {
+			flexfecOffset = FbsFlexFec.createFlexFec(
+				builder,
+				encoding.flexfec.ssrc
+			);
+		}
+
 		// Prepare scalability mode.
 		let scalabilityModeOffset: number | undefined;
 
@@ -178,6 +191,15 @@ export function serializeRtpEncodingParameters(
 		// Add RTX.
 		if (rtxOffset) {
 			FbsRtpEncodingParameters.addRtx(builder, rtxOffset);
+		}
+
+		// yeon: fec
+		// Add FlexFEC.
+		if (flexfecOffset) {
+			FbsRtpEncodingParameters.addFlexfec(
+				builder,
+				flexfecOffset
+			);
 		}
 
 		// Add DTX.
@@ -499,6 +521,8 @@ export function parseRtpEncodingParameters(
 		codecPayloadType:
 			data.codecPayloadType() !== null ? data.codecPayloadType()! : undefined,
 		rtx: data.rtx() ? { ssrc: data.rtx()!.ssrc() } : undefined,
+		// yeon: fec
+		flexfec: data.flexfec() ? { ssrc: data.flexfec()!.ssrc() } : undefined,
 		dtx: data.dtx(),
 		scalabilityMode: data.scalabilityMode() || undefined,
 		maxBitrate: data.maxBitrate() !== null ? data.maxBitrate()! : undefined,

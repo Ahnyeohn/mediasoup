@@ -9,6 +9,23 @@
 
 namespace RTC
 {
+
+	// yeon: fec
+	RtpFlexFecParameters::RtpFlexFecParameters(const FBS::RtpParameters::FlexFec* data)
+	{
+		MS_TRACE();
+
+		this->ssrc = data->ssrc();
+	}
+
+	flatbuffers::Offset<FBS::RtpParameters::FlexFec> RtpFlexFecParameters::FillBuffer(
+	  flatbuffers::FlatBufferBuilder& builder) const
+	{
+		MS_TRACE();
+
+		return FBS::RtpParameters::CreateFlexFec(builder, this->ssrc);
+	}
+
 	/* Instance methods. */
 
 	RtpEncodingParameters::RtpEncodingParameters(const FBS::RtpParameters::RtpEncodingParameters* data)
@@ -41,6 +58,14 @@ namespace RTC
 			this->hasRtx = true;
 		}
 
+		// yeon: fec
+		// flexfec is optional.
+		if (flatbuffers::IsFieldPresent(data, FBS::RtpParameters::RtpEncodingParameters::VT_FLEXFEC))
+		{
+			this->flexfec    = RtpFlexFecParameters(data->flexfec());
+			this->hasFlexFec = true;
+		}
+
 		// maxBitrate is optional.
 		if (auto maxBitrate = data->maxBitrate(); maxBitrate.has_value())
 		{
@@ -51,8 +76,7 @@ namespace RTC
 		this->dtx = data->dtx();
 
 		// scalabilityMode is optional.
-		if (flatbuffers::IsFieldPresent(
-		      data, FBS::RtpParameters::RtpEncodingParameters::VT_SCALABILITYMODE))
+		if (flatbuffers::IsFieldPresent(data, FBS::RtpParameters::RtpEncodingParameters::VT_SCALABILITYMODE))
 		{
 			const std::string scalabilityMode = data->scalabilityMode()->str();
 
@@ -86,6 +110,7 @@ namespace RTC
 	{
 		MS_TRACE();
 
+		// yeon: fec
 		return FBS::RtpParameters::CreateRtpEncodingParametersDirect(
 		  builder,
 		  this->ssrc != 0u ? flatbuffers::Optional<uint32_t>(this->ssrc) : flatbuffers::nullopt,
@@ -94,6 +119,9 @@ namespace RTC
 		                            : flatbuffers::nullopt,
 		  this->hasRtx ? this->rtx.FillBuffer(builder) : 0u,
 		  this->dtx,
-		  this->scalabilityMode.c_str());
+		  this->scalabilityMode.c_str(),
+		  this->maxBitrate != 0u ? flatbuffers::Optional<uint32_t>(this->maxBitrate)
+		                         : flatbuffers::nullopt,
+		  this->hasFlexFec ? this->flexfec.FillBuffer(builder) : 0u);
 	}
 } // namespace RTC

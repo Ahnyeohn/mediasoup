@@ -2328,98 +2328,98 @@ namespace RTC
 	}
 
 	// 요게 일반 버전
-	// void Transport::DistributeAvailableOutgoingBitrate()
-	// {
-	// 	MS_TRACE();
+	void Transport::DistributeAvailableOutgoingBitrate()
+	{
+		MS_TRACE();
 
-	// 	MS_ASSERT(this->tccClient, "no TransportCongestionClient");
+		MS_ASSERT(this->tccClient, "no TransportCongestionClient");
 
-	// 	std::multimap<uint8_t, RTC::Consumer*> multimapPriorityConsumer;
+		std::multimap<uint8_t, RTC::Consumer*> multimapPriorityConsumer;
 
-	// 	// Fill the map with Consumers and their priority (if > 0).
-	// 	for (auto& kv : this->mapConsumers)
-	// 	{
-	// 		auto* consumer = kv.second;
-	// 		auto priority  = consumer->GetBitratePriority();
+		// Fill the map with Consumers and their priority (if > 0).
+		for (auto& kv : this->mapConsumers)
+		{
+			auto* consumer = kv.second;
+			auto priority  = consumer->GetBitratePriority();
 
-	// 		if (priority > 0u)
-	// 		{
-	// 			multimapPriorityConsumer.emplace(priority, consumer);
-	// 		}
-	// 	}
+			if (priority > 0u)
+			{
+				multimapPriorityConsumer.emplace(priority, consumer);
+			}
+		}
 
-	// 	// Nobody wants bitrate. Exit.
-	// 	if (multimapPriorityConsumer.empty())
-	// 	{
-	// 		return;
-	// 	}
+		// Nobody wants bitrate. Exit.
+		if (multimapPriorityConsumer.empty())
+		{
+			return;
+		}
 
-	// 	bool baseAllocation = true;
-	// 	// yeon: camel
-	// 	// uint32_t availableBitrate = this->tccClient->GetAvailableBitrate();
-	// 	uint32_t availableBitrate = GetSelectedAvailableOutgoingBitrate();
+		bool baseAllocation = true;
+		// yeon: camel
+		// uint32_t availableBitrate = this->tccClient->GetAvailableBitrate();
+		uint32_t availableBitrate = GetSelectedAvailableOutgoingBitrate();
 
-	// 	// this->tccClient->RescheduleNextAvailableBitrateEvent();
-	// 	if (this->tccClient)
-	// 	{
-	// 		this->tccClient->RescheduleNextAvailableBitrateEvent();
-	// 	}
+		// this->tccClient->RescheduleNextAvailableBitrateEvent();
+		if (this->tccClient)
+		{
+			this->tccClient->RescheduleNextAvailableBitrateEvent();
+		}
 
-	// 	MS_DEBUG_DEV("before layer-by-layer iterations [availableBitrate:%" PRIu32 "]", availableBitrate);
+		MS_DEBUG_DEV("before layer-by-layer iterations [availableBitrate:%" PRIu32 "]", availableBitrate);
 
-	// 	// Redistribute the available bitrate by allowing Consumers to increase
-	// 	// layer by layer. Initially try to spread the bitrate across all
-	// 	// consumers. Then allocate the excess bitrate to Consumers starting
-	// 	// with the highest priorty.
-	// 	while (availableBitrate > 0u)
-	// 	{
-	// 		auto previousAvailableBitrate = availableBitrate;
+		// Redistribute the available bitrate by allowing Consumers to increase
+		// layer by layer. Initially try to spread the bitrate across all
+		// consumers. Then allocate the excess bitrate to Consumers starting
+		// with the highest priorty.
+		while (availableBitrate > 0u)
+		{
+			auto previousAvailableBitrate = availableBitrate;
 
-	// 		for (auto it = multimapPriorityConsumer.rbegin(); it != multimapPriorityConsumer.rend(); ++it)
-	// 		{
-	// 			auto priority  = it->first;
-	// 			auto* consumer = it->second;
-	// 			auto bweType   = this->tccClient->GetBweType();
+			for (auto it = multimapPriorityConsumer.rbegin(); it != multimapPriorityConsumer.rend(); ++it)
+			{
+				auto priority  = it->first;
+				auto* consumer = it->second;
+				auto bweType   = this->tccClient->GetBweType();
 
-	// 			// NOLINTNEXTLINE(bugprone-too-small-loop-variable)
-	// 			for (uint8_t i{ 1u }; i <= (baseAllocation ? 1u : priority); ++i)
-	// 			{
-	// 				uint32_t usedBitrate{ 0u };
-	// 				const bool considerLoss = (bweType == RTC::BweType::REMB);
+				// NOLINTNEXTLINE(bugprone-too-small-loop-variable)
+				for (uint8_t i{ 1u }; i <= (baseAllocation ? 1u : priority); ++i)
+				{
+					uint32_t usedBitrate{ 0u };
+					const bool considerLoss = (bweType == RTC::BweType::REMB);
 
-	// 				usedBitrate = consumer->IncreaseLayer(availableBitrate, considerLoss);
+					usedBitrate = consumer->IncreaseLayer(availableBitrate, considerLoss);
 
-	// 				MS_ASSERT(usedBitrate <= availableBitrate, "Consumer used more layer bitrate than given");
+					MS_ASSERT(usedBitrate <= availableBitrate, "Consumer used more layer bitrate than given");
 
-	// 				availableBitrate -= usedBitrate;
+					availableBitrate -= usedBitrate;
 
-	// 				// Exit the loop fast if used bitrate is 0.
-	// 				if (usedBitrate == 0u)
-	// 				{
-	// 					break;
-	// 				}
-	// 			}
-	// 		}
+					// Exit the loop fast if used bitrate is 0.
+					if (usedBitrate == 0u)
+					{
+						break;
+					}
+				}
+			}
 
-	// 		// If no Consumer used bitrate, exit the loop.
-	// 		if (availableBitrate == previousAvailableBitrate)
-	// 		{
-	// 			break;
-	// 		}
+			// If no Consumer used bitrate, exit the loop.
+			if (availableBitrate == previousAvailableBitrate)
+			{
+				break;
+			}
 
-	// 		baseAllocation = false;
-	// 	}
+			baseAllocation = false;
+		}
 
-	// 	MS_DEBUG_DEV("after layer-by-layer iterations [availableBitrate:%" PRIu32 "]", availableBitrate);
+		MS_DEBUG_DEV("after layer-by-layer iterations [availableBitrate:%" PRIu32 "]", availableBitrate);
 
-	// 	// Finally instruct Consumers to apply their computed layers.
-	// 	for (auto it = multimapPriorityConsumer.rbegin(); it != multimapPriorityConsumer.rend(); ++it)
-	// 	{
-	// 		auto* consumer = it->second;
+		// Finally instruct Consumers to apply their computed layers.
+		for (auto it = multimapPriorityConsumer.rbegin(); it != multimapPriorityConsumer.rend(); ++it)
+		{
+			auto* consumer = it->second;
 
-	// 		consumer->ApplyLayers();
-	// 	}
-	// }
+			consumer->ApplyLayers();
+		}
+	}
 
 	// 요게 2에서 바로 0으로 내리는 버전
 	// void Transport::DistributeAvailableOutgoingBitrate()
@@ -2596,216 +2596,216 @@ namespace RTC
 	// 	}
 	// }
 
-	void Transport::DistributeAvailableOutgoingBitrate()
-	{
-		MS_TRACE();
+	// void Transport::DistributeAvailableOutgoingBitrate()
+	// {
+	// 	MS_TRACE();
 
-		MS_ASSERT(this->tccClient, "no TransportCongestionClient");
+	// 	MS_ASSERT(this->tccClient, "no TransportCongestionClient");
 
-		// yeon: 1000 frames at 30fps ~= 33.33s.
-		static constexpr int64_t QosLayerZeroHoldMs{ 33333 };
+	// 	// yeon: 1000 frames at 30fps ~= 33.33s.
+	// 	static constexpr int64_t QosLayerZeroHoldMs{ 33333 };
 
-		const int64_t nowMs = DepLibUV::GetTimeMsInt64();
+	// 	const int64_t nowMs = DepLibUV::GetTimeMsInt64();
 
-		std::multimap<uint8_t, RTC::Consumer*> multimapPriorityConsumer;
+	// 	std::multimap<uint8_t, RTC::Consumer*> multimapPriorityConsumer;
 
-		// Fill the map with Consumers and their priority (if > 0).
-		for (auto& kv : this->mapConsumers)
-		{
-			auto* consumer = kv.second;
-			auto priority  = consumer->GetBitratePriority();
+	// 	// Fill the map with Consumers and their priority (if > 0).
+	// 	for (auto& kv : this->mapConsumers)
+	// 	{
+	// 		auto* consumer = kv.second;
+	// 		auto priority  = consumer->GetBitratePriority();
 
-			if (priority > 0u)
-			{
-				multimapPriorityConsumer.emplace(priority, consumer);
-			}
-		}
+	// 		if (priority > 0u)
+	// 		{
+	// 			multimapPriorityConsumer.emplace(priority, consumer);
+	// 		}
+	// 	}
 
-		// Nobody wants bitrate. Exit.
-		if (multimapPriorityConsumer.empty())
-		{
-			return;
-		}
+	// 	// Nobody wants bitrate. Exit.
+	// 	if (multimapPriorityConsumer.empty())
+	// 	{
+	// 		return;
+	// 	}
 
-		// yeon: QoS layer policy.
-		//
-		// 기존 bitrate allocation이 돌기 전에,
-		// 이전에 결정되어 있던 target/current spatial layer를 저장한다.
-		//
-		// audio/simple consumer는 GetQosTargetSpatialLayer() / GetQosCurrentSpatialLayer()
-		// 가 -1을 반환하므로 자동으로 제외된다.
-		std::unordered_map<RTC::Consumer*, int16_t> previousSpatialLayerByConsumer;
+	// 	// yeon: QoS layer policy.
+	// 	//
+	// 	// 기존 bitrate allocation이 돌기 전에,
+	// 	// 이전에 결정되어 있던 target/current spatial layer를 저장한다.
+	// 	//
+	// 	// audio/simple consumer는 GetQosTargetSpatialLayer() / GetQosCurrentSpatialLayer()
+	// 	// 가 -1을 반환하므로 자동으로 제외된다.
+	// 	std::unordered_map<RTC::Consumer*, int16_t> previousSpatialLayerByConsumer;
 
-		for (auto it = multimapPriorityConsumer.rbegin(); it != multimapPriorityConsumer.rend(); ++it)
-		{
-			auto* consumer = it->second;
+	// 	for (auto it = multimapPriorityConsumer.rbegin(); it != multimapPriorityConsumer.rend(); ++it)
+	// 	{
+	// 		auto* consumer = it->second;
 
-			if (!consumer)
-			{
-				continue;
-			}
+	// 		if (!consumer)
+	// 		{
+	// 			continue;
+	// 		}
 
-			int16_t previousSpatialLayer = consumer->GetQosTargetSpatialLayer();
+	// 		int16_t previousSpatialLayer = consumer->GetQosTargetSpatialLayer();
 
-			if (previousSpatialLayer < 0)
-			{
-				previousSpatialLayer = consumer->GetQosCurrentSpatialLayer();
-			}
+	// 		if (previousSpatialLayer < 0)
+	// 		{
+	// 			previousSpatialLayer = consumer->GetQosCurrentSpatialLayer();
+	// 		}
 
-			if (previousSpatialLayer >= 0)
-			{
-				previousSpatialLayerByConsumer[consumer] = previousSpatialLayer;
-			}
-		}
+	// 		if (previousSpatialLayer >= 0)
+	// 		{
+	// 			previousSpatialLayerByConsumer[consumer] = previousSpatialLayer;
+	// 		}
+	// 	}
 
-		bool baseAllocation = true;
+	// 	bool baseAllocation = true;
 
-		// yeon: camel
-		// uint32_t availableBitrate = this->tccClient->GetAvailableBitrate();
-		uint32_t availableBitrate = GetSelectedAvailableOutgoingBitrate();
+	// 	// yeon: camel
+	// 	// uint32_t availableBitrate = this->tccClient->GetAvailableBitrate();
+	// 	uint32_t availableBitrate = GetSelectedAvailableOutgoingBitrate();
 
-		// this->tccClient->RescheduleNextAvailableBitrateEvent();
-		if (this->tccClient)
-		{
-			this->tccClient->RescheduleNextAvailableBitrateEvent();
-		}
+	// 	// this->tccClient->RescheduleNextAvailableBitrateEvent();
+	// 	if (this->tccClient)
+	// 	{
+	// 		this->tccClient->RescheduleNextAvailableBitrateEvent();
+	// 	}
 
-		MS_DEBUG_DEV("before layer-by-layer iterations [availableBitrate:%" PRIu32 "]", availableBitrate);
+	// 	MS_DEBUG_DEV("before layer-by-layer iterations [availableBitrate:%" PRIu32 "]", availableBitrate);
 
-		// Redistribute the available bitrate by allowing Consumers to increase
-		// layer by layer. Initially try to spread the bitrate across all
-		// consumers. Then allocate the excess bitrate to Consumers starting
-		// with the highest priority.
-		while (availableBitrate > 0u)
-		{
-			auto previousAvailableBitrate = availableBitrate;
+	// 	// Redistribute the available bitrate by allowing Consumers to increase
+	// 	// layer by layer. Initially try to spread the bitrate across all
+	// 	// consumers. Then allocate the excess bitrate to Consumers starting
+	// 	// with the highest priority.
+	// 	while (availableBitrate > 0u)
+	// 	{
+	// 		auto previousAvailableBitrate = availableBitrate;
 
-			for (auto it = multimapPriorityConsumer.rbegin(); it != multimapPriorityConsumer.rend(); ++it)
-			{
-				auto priority  = it->first;
-				auto* consumer = it->second;
-				auto bweType   = this->tccClient->GetBweType();
+	// 		for (auto it = multimapPriorityConsumer.rbegin(); it != multimapPriorityConsumer.rend(); ++it)
+	// 		{
+	// 			auto priority  = it->first;
+	// 			auto* consumer = it->second;
+	// 			auto bweType   = this->tccClient->GetBweType();
 
-				// NOLINTNEXTLINE(bugprone-too-small-loop-variable)
-				for (uint8_t i{ 1u }; i <= (baseAllocation ? 1u : priority); ++i)
-				{
-					uint32_t usedBitrate{ 0u };
-					const bool considerLoss = (bweType == RTC::BweType::REMB);
+	// 			// NOLINTNEXTLINE(bugprone-too-small-loop-variable)
+	// 			for (uint8_t i{ 1u }; i <= (baseAllocation ? 1u : priority); ++i)
+	// 			{
+	// 				uint32_t usedBitrate{ 0u };
+	// 				const bool considerLoss = (bweType == RTC::BweType::REMB);
 
-					usedBitrate = consumer->IncreaseLayer(availableBitrate, considerLoss);
+	// 				usedBitrate = consumer->IncreaseLayer(availableBitrate, considerLoss);
 
-					MS_ASSERT(usedBitrate <= availableBitrate, "Consumer used more layer bitrate than given");
+	// 				MS_ASSERT(usedBitrate <= availableBitrate, "Consumer used more layer bitrate than given");
 
-					availableBitrate -= usedBitrate;
+	// 				availableBitrate -= usedBitrate;
 
-					// Exit the loop fast if used bitrate is 0.
-					if (usedBitrate == 0u)
-					{
-						break;
-					}
-				}
-			}
+	// 				// Exit the loop fast if used bitrate is 0.
+	// 				if (usedBitrate == 0u)
+	// 				{
+	// 					break;
+	// 				}
+	// 			}
+	// 		}
 
-			// If no Consumer used bitrate, exit the loop.
-			if (availableBitrate == previousAvailableBitrate)
-			{
-				break;
-			}
+	// 		// If no Consumer used bitrate, exit the loop.
+	// 		if (availableBitrate == previousAvailableBitrate)
+	// 		{
+	// 			break;
+	// 		}
 
-			baseAllocation = false;
-		}
+	// 		baseAllocation = false;
+	// 	}
 
-		MS_DEBUG_DEV("after layer-by-layer iterations [availableBitrate:%" PRIu32 "]", availableBitrate);
+	// 	MS_DEBUG_DEV("after layer-by-layer iterations [availableBitrate:%" PRIu32 "]", availableBitrate);
 
-		// yeon: QoS layer policy override.
-		//
-		// 요구한 정책:
-		//
-		// 1. 기존 allocator가 2 -> 1로 내리려고 하면,
-		//    1이 아니라 0으로 바로 내린다.
-		//
-		// 2. 그 순간부터 33초 동안 layer 0을 유지한다.
-		//    33초는 30fps 기준 약 1000 frames.
-		//
-		// 3. 33초가 지나면 allocator 결과와 상관없이 layer 1로 강제 상승한다.
-		//
-		// 4. 여기서는 ApplyLayers()를 호출하지 않는다.
-		//    기존 ApplyLayers() 호출 직전에 provisionalTargetLayers만 수정한다.
-		for (auto& kv : previousSpatialLayerByConsumer)
-		{
-			auto* consumer                     = kv.first;
-			const int16_t previousSpatialLayer = kv.second;
+	// 	// yeon: QoS layer policy override.
+	// 	//
+	// 	// 요구한 정책:
+	// 	//
+	// 	// 1. 기존 allocator가 2 -> 1로 내리려고 하면,
+	// 	//    1이 아니라 0으로 바로 내린다.
+	// 	//
+	// 	// 2. 그 순간부터 33초 동안 layer 0을 유지한다.
+	// 	//    33초는 30fps 기준 약 1000 frames.
+	// 	//
+	// 	// 3. 33초가 지나면 allocator 결과와 상관없이 layer 1로 강제 상승한다.
+	// 	//
+	// 	// 4. 여기서는 ApplyLayers()를 호출하지 않는다.
+	// 	//    기존 ApplyLayers() 호출 직전에 provisionalTargetLayers만 수정한다.
+	// 	for (auto& kv : previousSpatialLayerByConsumer)
+	// 	{
+	// 		auto* consumer                     = kv.first;
+	// 		const int16_t previousSpatialLayer = kv.second;
 
-			if (!consumer)
-			{
-				continue;
-			}
+	// 		if (!consumer)
+	// 		{
+	// 			continue;
+	// 		}
 
-			const int16_t normalProvisionalSpatialLayer = consumer->GetQosProvisionalTargetSpatialLayer();
+	// 		const int16_t normalProvisionalSpatialLayer = consumer->GetQosProvisionalTargetSpatialLayer();
 
-			if (normalProvisionalSpatialLayer < 0)
-			{
-				continue;
-			}
+	// 		if (normalProvisionalSpatialLayer < 0)
+	// 		{
+	// 			continue;
+	// 		}
 
-			const bool holdActive     = consumer->IsQosLayerZeroHoldActive();
-			const int64_t holdStartMs = consumer->GetQosLayerZeroHoldStartMs();
+	// 		const bool holdActive     = consumer->IsQosLayerZeroHoldActive();
+	// 		const int64_t holdStartMs = consumer->GetQosLayerZeroHoldStartMs();
 
-			const int64_t holdElapsedMs = holdActive && holdStartMs > 0 ? nowMs - holdStartMs : 0;
+	// 		const int64_t holdElapsedMs = holdActive && holdStartMs > 0 ? nowMs - holdStartMs : 0;
 
-			const bool holdExpired = holdActive && holdElapsedMs >= QosLayerZeroHoldMs;
+	// 		const bool holdExpired = holdActive && holdElapsedMs >= QosLayerZeroHoldMs;
 
-			int16_t forcedSpatialLayer{ -1 };
+	// 		int16_t forcedSpatialLayer{ -1 };
 
-			// Case 1:
-			// 기존 allocator가 2 -> 1로 내리려고 하면,
-			// 1이 아니라 0으로 강제하고 hold 시작.
-			if (!holdActive && previousSpatialLayer == 2 && normalProvisionalSpatialLayer == 1)
-			{
-				forcedSpatialLayer = 0;
-				consumer->StartQosLayerZeroHold(nowMs);
-			}
-			// Case 2:
-			// hold 중이고 아직 33초가 안 지났으면 무조건 0 유지.
-			else if (holdActive && !holdExpired)
-			{
-				forcedSpatialLayer = 0;
-			}
-			// Case 3:
-			// hold 시작 후 33초가 지났으면 allocator 결과와 상관없이 1로 강제 상승.
-			else if (holdActive && holdExpired)
-			{
-				forcedSpatialLayer = 1;
-				// consumer->StopQosLayerZeroHold();
-			}
+	// 		// Case 1:
+	// 		// 기존 allocator가 2 -> 1로 내리려고 하면,
+	// 		// 1이 아니라 0으로 강제하고 hold 시작.
+	// 		if (!holdActive && previousSpatialLayer == 2 && normalProvisionalSpatialLayer == 1)
+	// 		{
+	// 			forcedSpatialLayer = 0;
+	// 			consumer->StartQosLayerZeroHold(nowMs);
+	// 		}
+	// 		// Case 2:
+	// 		// hold 중이고 아직 33초가 안 지났으면 무조건 0 유지.
+	// 		else if (holdActive && !holdExpired)
+	// 		{
+	// 			forcedSpatialLayer = 0;
+	// 		}
+	// 		// Case 3:
+	// 		// hold 시작 후 33초가 지났으면 allocator 결과와 상관없이 1로 강제 상승.
+	// 		else if (holdActive && holdExpired)
+	// 		{
+	// 			forcedSpatialLayer = 1;
+	// 			// consumer->StopQosLayerZeroHold();
+	// 		}
 
-			if (forcedSpatialLayer >= 0)
-			{
-				MS_WARN_TAG(
-				  bwe,
-				  "QoS layer policy overrides provisional spatial layer "
-				  "[previous:%" PRIi16 ", normal:%" PRIi16 ", forced:%" PRIi16
-				  ", holdActive:%d, holdExpired:%d, holdElapsedMs:%" PRIi64 "/%" PRIi64 "]",
-				  previousSpatialLayer,
-				  normalProvisionalSpatialLayer,
-				  forcedSpatialLayer,
-				  static_cast<int>(holdActive),
-				  static_cast<int>(holdExpired),
-				  holdElapsedMs,
-				  QosLayerZeroHoldMs);
+	// 		if (forcedSpatialLayer >= 0)
+	// 		{
+	// 			// MS_WARN_TAG(
+	// 			//   bwe,
+	// 			//   "QoS layer policy overrides provisional spatial layer "
+	// 			//   "[previous:%" PRIi16 ", normal:%" PRIi16 ", forced:%" PRIi16
+	// 			//   ", holdActive:%d, holdExpired:%d, holdElapsedMs:%" PRIi64 "/%" PRIi64 "]",
+	// 			//   previousSpatialLayer,
+	// 			//   normalProvisionalSpatialLayer,
+	// 			//   forcedSpatialLayer,
+	// 			//   static_cast<int>(holdActive),
+	// 			//   static_cast<int>(holdExpired),
+	// 			//   holdElapsedMs,
+	// 			//   QosLayerZeroHoldMs);
 
-				consumer->ForceQosProvisionalSpatialLayer(forcedSpatialLayer);
-			}
-		}
+	// 			consumer->ForceQosProvisionalSpatialLayer(forcedSpatialLayer);
+	// 		}
+	// 	}
 
-		// Finally instruct Consumers to apply their computed layers.
-		for (auto it = multimapPriorityConsumer.rbegin(); it != multimapPriorityConsumer.rend(); ++it)
-		{
-			auto* consumer = it->second;
+	// 	// Finally instruct Consumers to apply their computed layers.
+	// 	for (auto it = multimapPriorityConsumer.rbegin(); it != multimapPriorityConsumer.rend(); ++it)
+	// 	{
+	// 		auto* consumer = it->second;
 
-			consumer->ApplyLayers();
-		}
-	}
+	// 		consumer->ApplyLayers();
+	// 	}
+	// }
 
 	void Transport::ComputeOutgoingDesiredBitrate(bool forceBitrate)
 	{

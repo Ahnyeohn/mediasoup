@@ -111,6 +111,7 @@ common_sources = [
   'src/RTC/RtpListener.cpp',
   'src/RTC/RtpObserver.cpp',
   'src/RTC/RtpPacket.cpp',
+  'src/RTC/FlexFecEncoder.cpp',
   'src/RTC/RtpProbationGenerator.cpp',
   'src/RTC/RtpRetransmissionBuffer.cpp',
   'src/RTC/RtpStream.cpp',

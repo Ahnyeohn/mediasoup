@@ -584,6 +584,7 @@ export abstract class TransportImpl<
 		preferredLayers,
 		ignoreDtx = false,
 		enableRtx,
+		enableFlexFec = false, // yeon: fec
 		pipe = false,
 		appData,
 	}: ConsumerOptions<ConsumerAppData>): Promise<Consumer<ConsumerAppData>> {
@@ -620,6 +621,7 @@ export abstract class TransportImpl<
 			remoteRtpCapabilities: clonedRtpCapabilities,
 			pipe,
 			enableRtx,
+			enableFlexFec, // yeon: fec
 		});
 
 		// Set MID.

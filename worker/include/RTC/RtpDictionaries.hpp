@@ -182,6 +182,20 @@ namespace RTC
 		uint32_t ssrc{ 0u };
 	};
 
+	// yeon: fec
+	class RtpFlexFecParameters
+	{
+	public:
+		RtpFlexFecParameters() = default;
+		explicit RtpFlexFecParameters(const FBS::RtpParameters::FlexFec* data);
+
+		flatbuffers::Offset<FBS::RtpParameters::FlexFec> FillBuffer(
+		  flatbuffers::FlatBufferBuilder& builder) const;
+
+	public:
+		uint32_t ssrc{ 0u };
+	};
+
 	class RtpEncodingParameters
 	{
 	public:
@@ -196,8 +210,14 @@ namespace RTC
 		std::string rid;
 		uint8_t codecPayloadType{ 0u };
 		bool hasCodecPayloadType{ false };
+
 		RtpRtxParameters rtx;
 		bool hasRtx{ false };
+
+		// yeon: fec
+		RtpFlexFecParameters flexfec;
+		bool hasFlexFec{ false };
+
 		uint32_t maxBitrate{ 0u };
 		double maxFramerate{ 0 };
 		bool dtx{ false };

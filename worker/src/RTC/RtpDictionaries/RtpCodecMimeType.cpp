@@ -43,7 +43,8 @@ namespace RTC
 		// Feature codecs:
 		{ "rtx",             RtpCodecMimeType::Subtype::RTX             },
 		{ "ulpfec",          RtpCodecMimeType::Subtype::ULPFEC          },
-		{ "flexfec",         RtpCodecMimeType::Subtype::FLEXFEC         },
+		{ "flexfec",         RtpCodecMimeType::Subtype::FLEXFEC         },\
+		{ "flexfec-03", RtpCodecMimeType::Subtype::FLEXFEC    }, // yeon: fec
 		{ "x-ulpfecuc",      RtpCodecMimeType::Subtype::X_ULPFECUC      },
 		{ "red",             RtpCodecMimeType::Subtype::RED             }
 	};
@@ -69,7 +70,7 @@ namespace RTC
 		// Feature codecs:
 		{ RtpCodecMimeType::Subtype::RTX,             "rtx"             },
 		{ RtpCodecMimeType::Subtype::ULPFEC,          "ulpfec"          },
-		{ RtpCodecMimeType::Subtype::FLEXFEC,         "flexfec"         },
+		{ RtpCodecMimeType::Subtype::FLEXFEC,         "flexfec-03"      }, // yeon: fec
 		{ RtpCodecMimeType::Subtype::X_ULPFECUC,      "x-ulpfecuc"      },
 		{ RtpCodecMimeType::Subtype::RED,             "red"             }
 	};

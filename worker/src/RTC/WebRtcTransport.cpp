@@ -39,6 +39,9 @@
 
 #include <memory>
 
+// yeon: fec
+#include <exception>
+
 // ===== pacing 여부 ====
 static bool ispacing = false;
 // ===== 패킷 send 분포 로그 ====
@@ -2352,96 +2355,6 @@ namespace RTC
 		std::array<uint32_t, 4> tidPkts{ 0, 0, 0, 0 }; // [0],[1],[2],[unknown]
 	};
 
-	// yeon : pacing 구현으로 인해 함수 변경
-	// void WebRtcTransport::SendRtpPacket(
-	//   RTC::Consumer* consumer, RTC::RtpPacket* packet, const RTC::Transport::onSendCallback* cb)
-	// {
-	// 	MS_TRACE();
-	// 	int a;
-	// 	//MS_ERROR_STD();
-	// 	if(this->tccClient)
-	// 	{
-	// 		a = 101;
-	// 	}
-	// 	else
-	// 	{
-	// 		a = 141;
-	// 	}
-	// 	if (!IsConnected())
-	// 	{
-	// 		if (cb)
-	// 		{
-	// 			(*cb)(false);
-	// 			delete cb;
-	// 		}
-
-	// 		return;
-	// 	}
-
-	// 	// Ensure there is sending SRTP session.
-	// 	if (!this->srtpSendSession)
-	// 	{
-	// 		MS_WARN_DEV("ignoring RTP packet due to non sending SRTP session");
-
-	// 		if (cb)
-	// 		{
-	// 			(*cb)(false);
-	// 			delete cb;
-	// 		}
-
-	// 		return;
-	// 	}
-
-	// 	if(ParseFramePrefixforSend(packet->GetPayload(), packet->GetPayloadLength(),
-	// &packet->rtpPrefix)) { 		const double SFUlatency = packet->rtpPrefix.SFUsendMs -
-	// packet->rtpPrefix.SFUrecvMs;
-	// 		// MS_ERROR_STD("[STAMP] FrameID=%d, p2s= %.3f, SFUlatency=%.3f, a=%d",
-	// 		// 	packet->rtpPrefix.FrameID, packet->rtpPrefix.p2s, SFUlatency, a);
-
-	// 		// MS_ERROR_STD("[STAMP] FrameID=%d, sendTsMs= %.3f, SFUsendMs=%.3f, SFUrecvMs=%.3f,
-	// SFUlatency=%.3f",
-	// 		// 	packet->rtpPrefix.FrameID, packet->rtpPrefix.sendTsMs, packet->rtpPrefix.SFUsendMs,
-	// packet->rtpPrefix.SFUrecvMs, SFUlatency);
-
-	// 	}
-
-	// 	const uint8_t* data = packet->GetData();
-	// 	auto len            = packet->GetSize();
-
-	// 	if (!this->srtpSendSession->EncryptRtp(&data, &len))
-	// 	{
-	// 		if (cb)
-	// 		{
-	// 			(*cb)(false);
-	// 			delete cb;
-	// 		}
-
-	// 		return;
-	// 	}
-
-	// 	/** logger **/
-	// 	// auto recvUs = packet->GetReceivedAtUs();
-	// 	// auto nowUs = DepLibUV::GetTimeUsInt64();
-	// 	// auto delayUs = (recvUs != 0 ? (nowUs - recvUs) : 0);
-
-	// 	// 추가: RTP 패킷의 각종 정보를 로깅하는 코드
-	// 	// MS_ERROR_STD("[SFU_DELAY] ssrc=%" PRIu32 " seq=%" PRIu16 " timestamp=%" PRIu32 "
-	// packetsize=%zu payloadlength=%zu recvUs=%" PRIu64 " nowUs=%" PRIu64 " deltaUs=%" PRId64 "\n",
-	// 	// 	packet->GetSsrc(),
-	// 	// 	packet->GetSequenceNumber(),
-	// 	// 	packet->GetTimestamp(),
-	// 	// 	packet->GetSize(),
-	// 	// 	packet->GetPayloadLength(),
-	// 	// 	recvUs,
-	// 	// 	nowUs,
-	// 	// 	delayUs);
-
-	// 	this->iceServer->GetSelectedTuple()->Send(data, len, cb);
-
-	// 	// Increase send transmission.
-	// 	RTC::Transport::DataSent(len);
-	// }
-
 	// yeon : pacing 구현을 위한 새로운 SendRtpPacket 정의
 	void WebRtcTransport::PredictSlack(RTC::Consumer* consumer, RTC::RtpPacket* packet)
 	{
@@ -2478,6 +2391,462 @@ namespace RTC
 		}
 	}
 
+	// 첫 비디오 패킷이 전송될 때 Consumer의 RTP parameters에서 다음 정보를 꺼냄:
+	/*
+	  media PT       : VP8 101
+	  FlexFEC PT     : 118
+	  media SSRC     : 예) 843464510
+	  FlexFEC SSRC   : 예) 843464512
+	*/
+	WebRtcTransport::FlexFecConsumerState* WebRtcTransport::GetOrCreateFlexFecState(RTC::Consumer* consumer)
+	{
+		if (!consumer || consumer->GetKind() != RTC::Media::Kind::VIDEO)
+		{
+			return nullptr;
+		}
+
+		auto stateIt = this->flexFecStatesByConsumerId.find(consumer->id);
+
+		if (stateIt != this->flexFecStatesByConsumerId.end())
+		{
+			return &stateIt->second;
+		}
+
+		const auto& rtpParameters = consumer->GetRtpParameters();
+
+		if (rtpParameters.encodings.empty() || consumer->GetMediaSsrcs().empty())
+		{
+			return nullptr;
+		}
+
+		const auto& encoding = rtpParameters.encodings.front();
+
+		// FlexFEC가 활성화되지 않은 Consumer.
+		if (!encoding.hasFlexFec || encoding.flexfec.ssrc == 0u)
+		{
+			return nullptr;
+		}
+
+		uint8_t flexFecPayloadType{ 0u };
+		bool flexFecCodecFound{ false };
+
+		for (const auto& codec : rtpParameters.codecs)
+		{
+			if (codec.mimeType.subtype == RTC::RtpCodecMimeType::Subtype::FLEXFEC)
+			{
+				flexFecPayloadType = codec.payloadType;
+				flexFecCodecFound  = true;
+
+				break;
+			}
+		}
+
+		if (!flexFecCodecFound)
+		{
+			MS_WARN_TAG(rtp, "FlexFEC codec not found [consumerId:%s]", consumer->id.c_str());
+
+			return nullptr;
+		}
+
+		FlexFecConsumerState state;
+
+		state.payloadType = flexFecPayloadType;
+		state.mediaSsrc   = consumer->GetMediaSsrcs().front();
+		state.flexFecSsrc = encoding.flexfec.ssrc;
+
+		// 일단 현재 시각과 SSRC를 섞어서 초기 sequence number를 결정.
+		state.nextSequenceNumber =
+		  static_cast<uint16_t>((DepLibUV::GetTimeMs() ^ state.mediaSsrc ^ state.flexFecSsrc) & 0xffffu);
+
+		try
+		{
+			state.encoder = std::make_unique<RTC::FlexFecEncoder>(state.flexFecSsrc, state.mediaSsrc);
+		}
+		catch (const std::exception& error)
+		{
+			MS_WARN_TAG(
+			  rtp,
+			  "failed to create FlexFEC state "
+			  "[consumerId:%s, error:%s]",
+			  consumer->id.c_str(),
+			  error.what());
+
+			return nullptr;
+		}
+
+		auto result = this->flexFecStatesByConsumerId.emplace(consumer->id, std::move(state));
+
+		auto& insertedState = result.first->second;
+
+		MS_WARN_TAG(
+		  rtp,
+		  "[FlexFEC] encoder initialized "
+		  "[consumerId:%s, payloadType:%" PRIu8 ", mediaSsrc:%" PRIu32 ", flexFecSsrc:%" PRIu32
+		  ", initialSeq:%" PRIu16 "]",
+		  consumer->id.c_str(),
+		  insertedState.payloadType,
+		  insertedState.mediaSsrc,
+		  insertedState.flexFecSsrc,
+		  insertedState.nextSequenceNumber);
+
+		return &insertedState;
+	}
+
+	bool WebRtcTransport::IsFlexFecPacket(const RTC::Consumer* consumer, const RTC::RtpPacket* packet) const
+	{
+		if (!consumer || !packet)
+		{
+			return false;
+		}
+
+		auto stateIt = this->flexFecStatesByConsumerId.find(consumer->id);
+
+		return stateIt != this->flexFecStatesByConsumerId.end() &&
+		       packet->GetSsrc() == stateIt->second.flexFecSsrc;
+	}
+
+	// 여기서 반환되는 GeneratedPayload는 RTP 전체 패킷이 아니라:
+	/*FlexFEC header
+	+ packet mask
+	+ recovery data*/
+	void WebRtcTransport::GenerateAndSendFlexFecBlock(
+	  RTC::Consumer* consumer, FlexFecConsumerState& state, uint32_t timestamp)
+	{
+		if (!state.encoder || state.encoder->GetBufferedPacketCount() == 0u)
+		{
+			return;
+		}
+
+		// 64 / 255 ≈ 25% 보호율.
+		constexpr uint8_t ProtectionFactor{ 64u };
+
+		// 약 10%
+		// constexpr uint8_t ProtectionFactor{ 26u };
+
+		// 약 40%
+		//constexpr uint8_t ProtectionFactor{ 102u };
+
+
+		const size_t protectedPacketCount = state.encoder->GetBufferedPacketCount();
+
+		std::vector<RTC::FlexFecEncoder::GeneratedPayload> generatedPayloads;
+
+		if (!state.encoder->Generate(ProtectionFactor, generatedPayloads))
+		{
+			return;
+		}
+
+		for (const auto& generatedPayload : generatedPayloads)
+		{
+			if (generatedPayload.data.empty())
+			{
+				continue;
+			}
+
+			SendFlexFecPacket(
+			  consumer, state, generatedPayload.data.data(), generatedPayload.data.size(), timestamp);
+		}
+
+		MS_DEBUG_TAG(
+		  rtp,
+		  "[FlexFEC] block generated "
+		  "[consumerId:%s, timestamp:%" PRIu32 ", mediaPackets:%zu, fecPackets:%zu]",
+		  consumer->id.c_str(),
+		  timestamp,
+		  protectedPacketCount,
+		  generatedPayloads.size());
+	}
+
+	void WebRtcTransport::SendFlexFecPacket(
+	  RTC::Consumer* consumer,
+	  FlexFecConsumerState& state,
+	  const uint8_t* payload,
+	  size_t payloadLength,
+	  uint32_t timestamp)
+	{
+		if (!consumer || !payload || payloadLength == 0u)
+		{
+			return;
+		}
+
+		std::vector<uint8_t> buffer(RTC::RtpPacket::HeaderSize + payloadLength, 0u);
+
+		/*
+		 * RTP fixed header.
+		 *
+		 * V  = 2
+		 * P  = 0
+		 * X  = 0
+		 * CC = 0
+		 * M  = 0
+		 * PT = FlexFEC PT, 현재 118
+		 */
+		buffer[0] = 0x80u;
+		buffer[1] = state.payloadType & 0x7fu;
+
+		const uint16_t sequenceNumber = htons(state.nextSequenceNumber++);
+
+		const uint32_t networkTimestamp = htonl(timestamp);
+
+		const uint32_t networkSsrc = htonl(state.flexFecSsrc);
+
+		std::memcpy(buffer.data() + 2u, &sequenceNumber, sizeof(sequenceNumber));
+
+		std::memcpy(buffer.data() + 4u, &networkTimestamp, sizeof(networkTimestamp));
+
+		std::memcpy(buffer.data() + 8u, &networkSsrc, sizeof(networkSsrc));
+
+		std::memcpy(buffer.data() + RTC::RtpPacket::HeaderSize, payload, payloadLength);
+
+		std::unique_ptr<RTC::RtpPacket> fecPacket(RTC::RtpPacket::Parse(buffer.data(), buffer.size()));
+
+		if (!fecPacket)
+		{
+			MS_WARN_TAG(
+			  rtp,
+			  "failed to parse generated FlexFEC RTP packet "
+			  "[consumerId:%s, payloadLength:%zu]",
+			  consumer->id.c_str(),
+			  payloadLength);
+
+			return;
+		}
+
+		/*
+		 * 일반 SendRtpPacket()으로 재진입하지 않는다.
+		 *
+		 * 이유:
+		 * - FEC를 다시 FEC encoder에 넣는 재귀 방지
+		 * - Slack/frame 통계에 FEC 패킷이 섞이는 것 방지
+		 *
+		 * 단, 원본 미디어와 동일하게 pacer와 SRTP 전송 경로는 거친다.
+		 */
+		if (this->rtpPacer && ispacing)
+		{
+			// Enqueue() 내부에서 패킷을 clone하므로
+			// 이 함수의 지역 buffer 수명과 무관하다.
+			this->rtpPacer->Enqueue(consumer, fecPacket.get(), nullptr);
+		}
+		else
+		{
+			SendRtpPacketNow(consumer, fecPacket.get(), nullptr);
+		}
+	}
+
+	// void WebRtcTransport::ProcessMediaPacketForFlexFec(RTC::Consumer* consumer, RTC::RtpPacket* packet)
+	// {
+	// 	auto* state = GetOrCreateFlexFecState(consumer);
+
+	// 	if (!state || !state->encoder || packet->GetSsrc() != state->mediaSsrc)
+	// 	{
+	// 		/*
+	// 		 * 여기서 media SSRC만 허용한다.
+	// 		 *
+	// 		 * 따라서:
+	// 		 * - RTX SSRC 제외
+	// 		 * - FlexFEC SSRC 제외
+	// 		 */
+	// 		return;
+	// 	}
+
+	// 	const uint32_t timestamp = packet->GetTimestamp();
+
+	// 	if (!state->frameInitialized)
+	// 	{
+	// 		state->frameInitialized = true;
+	// 		state->currentTimestamp = timestamp;
+	// 	}
+	// 	else if (state->currentTimestamp != timestamp)
+	// 	{
+	// 		/*
+	// 		 * Marker가 관찰되지 않았더라도 RTP timestamp가 변경되면
+	// 		 * 이전 프레임의 수집 블록을 마무리한다.
+	// 		 */
+	// 		GenerateAndSendFlexFecBlock(consumer, *state, state->currentTimestamp);
+
+	// 		state->currentTimestamp = timestamp;
+	// 	}
+
+	// 	/*
+	// 	 * M77 packet mask가 한 FEC 블록에서 보호할 수 있는
+	// 	 * 최대 미디어 패킷 수는 48개이다.
+	// 	 *
+	// 	 * 한 프레임이 48개를 넘으면 여러 FEC 블록으로 나눈다.
+	// 	 */
+	// 	if (state->encoder->GetBufferedPacketCount() >= 48u)
+	// 	{
+	// 		GenerateAndSendFlexFecBlock(consumer, *state, state->currentTimestamp);
+	// 	}
+
+	// 	if (!state->encoder->AddMediaPacket(packet->GetData(), packet->GetSize()))
+	// 	{
+	// 		state->encoder->Reset();
+	// 		state->frameInitialized = false;
+
+	// 		return;
+	// 	}
+
+	// 	// RTP marker가 프레임 마지막 패킷임을 나타낸다.
+	// 	if (packet->HasMarker())
+	// 	{
+	// 		GenerateAndSendFlexFecBlock(consumer, *state, timestamp);
+
+	// 		state->frameInitialized = false;
+	// 	}
+	// }
+
+	WebRtcTransport::FlexFecConsumerState* WebRtcTransport::CollectMediaPacketForFlexFec(
+	  RTC::Consumer* consumer, RTC::RtpPacket* packet)
+	{
+		auto* state = GetOrCreateFlexFecState(consumer);
+
+		if (!state || !state->encoder || !packet || packet->GetSsrc() != state->mediaSsrc)
+		{
+			/*
+			 * media SSRC만 FEC encoder에 넣는다.
+			 *
+			 * 따라서 다음은 제외된다.
+			 * - RTX SSRC
+			 * - FlexFEC SSRC
+			 */
+			return nullptr;
+		}
+
+		const uint32_t timestamp = packet->GetTimestamp();
+
+		if (!state->frameInitialized)
+		{
+			state->frameInitialized = true;
+			state->currentTimestamp = timestamp;
+		}
+		else if (state->currentTimestamp != timestamp)
+		{
+			/*
+			 * 이전 프레임에서 marker를 보지 못하고
+			 * 새로운 RTP timestamp가 시작된 경우다.
+			 *
+			 * 이전 프레임의 미디어 패킷들은 이미 앞선
+			 * SendRtpPacket() 호출에서 전송 또는 enqueue되었으므로,
+			 * 여기서 이전 블록의 FEC를 생성해도 순서상 문제없다.
+			 */
+			GenerateAndSendFlexFecBlock(consumer, *state, state->currentTimestamp);
+
+			state->currentTimestamp = timestamp;
+		}
+
+		/*
+		 * WebRTC M77 FEC mask가 한 블록에서 보호할 수 있는
+		 * 미디어 패킷 수를 48개로 제한하고 있으므로,
+		 * 큰 프레임은 여러 블록으로 나눈다.
+		 *
+		 * 여기 들어오기 전에 저장된 48개는 모두 이전 호출에서
+		 * 전송 또는 enqueue된 패킷들이다.
+		 */
+		if (state->encoder->GetBufferedPacketCount() >= 48u)
+		{
+			GenerateAndSendFlexFecBlock(consumer, *state, state->currentTimestamp);
+		}
+
+		/*
+		 * 현재 평문 미디어 RTP를 encoder 내부 버퍼에 복사한다.
+		 *
+		 * AddMediaPacket()은 packet의 메모리를 참조만 하는 것이 아니라
+		 * 내부 Packet 객체로 memcpy하므로, 이후 원본 packet이
+		 * SRTP 암호화되어도 FEC 계산에는 영향이 없다.
+		 */
+		if (!state->encoder->AddMediaPacket(packet->GetData(), packet->GetSize()))
+		{
+			MS_WARN_TAG(
+			  rtp,
+			  "[FlexFEC] failed to collect media RTP packet "
+			  "[consumerId:%s, timestamp:%" PRIu32 ", sequenceNumber:%" PRIu16 "]",
+			  consumer->id.c_str(),
+			  timestamp,
+			  packet->GetSequenceNumber());
+
+			state->encoder->Reset();
+			state->frameInitialized = false;
+
+			return nullptr;
+		}
+
+		if (packet->HasMarker())
+		{
+			/*
+			 * 여기서는 FEC를 생성하지 않는다.
+			 *
+			 * 현재 marker 미디어 패킷이 먼저 전송 또는 enqueue된 뒤,
+			 * SendRtpPacket()에서 반환된 state를 사용해 FEC를 생성한다.
+			 */
+			return state;
+		}
+
+		return nullptr;
+	}
+
+	// void WebRtcTransport::SendRtpPacket(
+	//   RTC::Consumer* consumer, RTC::RtpPacket* packet, const RTC::Transport::onSendCallback* cb)
+	// {
+	// 	MS_TRACE();
+
+	// 	if (!consumer || !packet)
+	// 	{
+	// 		if (cb)
+	// 		{
+	// 			(*cb)(false);
+	// 			delete cb;
+	// 		}
+
+	// 		return;
+	// 	}
+
+	// 	// yeon: fec
+	// 	ProcessMediaPacketForFlexFec(consumer, packet);
+
+	// 	// 항상 frame 관측은 해둠.
+	// 	if (this->rtpPacer)
+	// 	{
+	// 		this->rtpPacer->ObservePacketForFrame(packet);
+	// 	}
+
+	// 	const std::string& consumerId = consumer->id;
+	// 	const uint32_t ts             = packet->GetTimestamp();
+
+	// 	// ===== consumer별 새 프레임 첫 패킷인지 확인 =====
+	// 	bool& predictFrameInit = this->predictFrameInitByConsumerId[consumerId];
+	// 	uint32_t& currentPredictFrameTimestamp =
+	// 	  this->currentPredictFrameTimestampByConsumerId[consumerId];
+
+	// 	bool isNewFrame = false;
+
+	// 	if (!predictFrameInit)
+	// 	{
+	// 		predictFrameInit             = true;
+	// 		currentPredictFrameTimestamp = ts;
+	// 		isNewFrame                   = true;
+	// 	}
+	// 	else if (currentPredictFrameTimestamp != ts)
+	// 	{
+	// 		currentPredictFrameTimestamp = ts;
+	// 		isNewFrame                   = true;
+	// 	}
+
+	// 	// ===== 새 프레임일 때만 이 패킷을 보내기 전에 slack 예측 =====
+	// 	if (isNewFrame)
+	// 	{
+	// 		PredictSlack(consumer, packet);
+	// 	}
+
+	// 	if (this->rtpPacer && ispacing)
+	// 	{
+	// 		this->rtpPacer->Enqueue(consumer, packet, cb);
+	// 	}
+	// 	else
+	// 	{
+	// 		SendRtpPacketNow(consumer, packet, cb);
+	// 	}
+	// }
+
 	void WebRtcTransport::SendRtpPacket(
 	  RTC::Consumer* consumer, RTC::RtpPacket* packet, const RTC::Transport::onSendCallback* cb)
 	{
@@ -2494,6 +2863,20 @@ namespace RTC
 			return;
 		}
 
+		/*
+		 * 현재 미디어 RTP를 FEC encoder 내부에 복사한다.
+		 *
+		 * marker 패킷이면 flexFecStateToGenerate가 non-null이지만,
+		 * 아직 EncodeFec()는 수행하지 않는다.
+		 */
+		auto* flexFecStateToGenerate = CollectMediaPacketForFlexFec(consumer, packet);
+
+		/*
+		 * SendRtpPacketNow() 이후 packet 내용에 의존하지 않도록
+		 * RTP timestamp를 미리 저장한다.
+		 */
+		const uint32_t flexFecTimestamp = packet->GetTimestamp();
+
 		// 항상 frame 관측은 해둠.
 		if (this->rtpPacer)
 		{
@@ -2505,6 +2888,7 @@ namespace RTC
 
 		// ===== consumer별 새 프레임 첫 패킷인지 확인 =====
 		bool& predictFrameInit = this->predictFrameInitByConsumerId[consumerId];
+
 		uint32_t& currentPredictFrameTimestamp =
 		  this->currentPredictFrameTimestampByConsumerId[consumerId];
 
@@ -2528,6 +2912,9 @@ namespace RTC
 			PredictSlack(consumer, packet);
 		}
 
+		/*
+		 * 원본 미디어 RTP를 FEC보다 먼저 전송 경로에 넣는다.
+		 */
 		if (this->rtpPacer && ispacing)
 		{
 			this->rtpPacer->Enqueue(consumer, packet, cb);
@@ -2535,6 +2922,21 @@ namespace RTC
 		else
 		{
 			SendRtpPacketNow(consumer, packet, cb);
+		}
+
+		/*
+		 * 현재 미디어 패킷이 marker였다면,
+		 * 미디어를 먼저 전송 또는 enqueue한 이후 FEC를 생성한다.
+		 */
+		if (flexFecStateToGenerate)
+		{
+			/*
+			 * 먼저 프레임 상태를 종료한다.
+			 * Generate()가 내부 mediaPackets를 Reset()한다.
+			 */
+			flexFecStateToGenerate->frameInitialized = false;
+
+			GenerateAndSendFlexFecBlock(consumer, *flexFecStateToGenerate, flexFecTimestamp);
 		}
 	}
 
@@ -2601,7 +3003,9 @@ namespace RTC
 		this->iceServer->GetSelectedTuple()->Send(data, len, cb);
 
 		// ---- frame record store begin ----
-		if (consumer && consumer->GetKind() == RTC::Media::Kind::VIDEO && this->networkState)
+		if (
+		  !IsFlexFecPacket(consumer, packet) && consumer &&
+		  consumer->GetKind() == RTC::Media::Kind::VIDEO && this->networkState)
 		{
 			const std::string& transportId = this->id;
 			const std::string& consumerId  = consumer->id;

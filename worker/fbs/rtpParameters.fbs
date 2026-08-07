@@ -87,6 +87,11 @@ table Rtx {
     ssrc: uint32;
 }
 
+// yeon: fec
+table FlexFec {
+    ssrc: uint32;
+}
+
 table RtpEncodingParameters {
     ssrc: uint32 = null;
     rid: string;
@@ -95,6 +100,9 @@ table RtpEncodingParameters {
     dtx: bool = false;
     scalability_mode: string;
     max_bitrate: uint32 = null;
+
+    // yeon: fec
+    flexfec: FlexFec;
 }
 
 table RtcpParameters {

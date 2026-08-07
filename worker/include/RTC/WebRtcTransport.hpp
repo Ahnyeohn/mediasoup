@@ -30,6 +30,9 @@
 // yeon: multi viewer
 #include <unordered_map>
 
+// yeon: fec
+#include "RTC/FlexFecEncoder.hpp"
+
 // -------------------------------------------------------------------
 // App message kind
 // -------------------------------------------------------------------
@@ -378,6 +381,40 @@ namespace RTC
 		// 새 frame 감지도 consumer별로 관리.
 		std::unordered_map<std::string, bool> predictFrameInitByConsumerId;
 		std::unordered_map<std::string, uint32_t> currentPredictFrameTimestampByConsumerId;
+
+		// yeon: fec
+		// yeon: Consumer별 FlexFEC 송신 상태.
+		struct FlexFecConsumerState
+		{
+			uint8_t payloadType{ 0u };
+			uint32_t mediaSsrc{ 0u };
+			uint32_t flexFecSsrc{ 0u };
+			uint16_t nextSequenceNumber{ 0u };
+
+			bool frameInitialized{ false };
+			uint32_t currentTimestamp{ 0u };
+
+			std::unique_ptr<RTC::FlexFecEncoder> encoder;
+		};
+
+		FlexFecConsumerState* GetOrCreateFlexFecState(RTC::Consumer* consumer);
+
+		// void ProcessMediaPacketForFlexFec(RTC::Consumer* consumer, RTC::RtpPacket* packet);
+		FlexFecConsumerState* CollectMediaPacketForFlexFec(RTC::Consumer* consumer, RTC::RtpPacket* packet);
+
+		void GenerateAndSendFlexFecBlock(
+		  RTC::Consumer* consumer, FlexFecConsumerState& state, uint32_t timestamp);
+
+		void SendFlexFecPacket(
+		  RTC::Consumer* consumer,
+		  FlexFecConsumerState& state,
+		  const uint8_t* payload,
+		  size_t payloadLength,
+		  uint32_t timestamp);
+
+		bool IsFlexFecPacket(const RTC::Consumer* consumer, const RTC::RtpPacket* packet) const;
+
+		std::unordered_map<std::string, FlexFecConsumerState> flexFecStatesByConsumerId;
 
 		// Helper: actual immediate send path (your existing code moved here)
 		void SendRtpPacketNow(
