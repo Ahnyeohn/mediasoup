@@ -435,6 +435,47 @@ namespace RTC
 		// yeon: multi viewer
 	private:
 		std::optional<double> currentPredictedSlack;
+
+		// yeon: adaptive FEC.
+	private:
+		enum class FecSlackState
+		{
+			INSUFFICIENT,
+			NORMAL,
+			BAD,
+			SEVERE
+		};
+
+		struct FecSlackSample
+		{
+			int64_t timeMs{ 0 };
+			double slackMs{ 0.0 };
+			int8_t spatialLayer{ -1 };
+		};
+
+		struct FecLossSample
+		{
+			int64_t timeMs{ 0 };
+			double lossRate{ 0.0 };
+		};
+
+	private:
+		void AddFecSlackSample(double slackMs, int8_t spatialLayer, int64_t nowMs);
+
+		FecSlackState EvaluateFecSlackState(
+		  int64_t nowMs, double& baselineSlackMs, double& badFrameRatio, double& severeFrameRatio);
+
+		double GetRecentFecLossRate(int64_t nowMs);
+
+		void UpdateAdaptiveFecProtection(int64_t nowMs);
+
+	private:
+		std::deque<FecSlackSample> fecSlackSamples;
+		std::deque<FecLossSample> fecLossSamples;
+
+		uint8_t adaptiveFecProtectionFactor{ 64u };
+
+		int64_t lastFecDecisionMs{ 0 };
 	};
 
 } // namespace RTC

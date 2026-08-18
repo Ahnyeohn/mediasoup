@@ -26,6 +26,14 @@ namespace RTC
 	{
 		std::lock_guard<std::mutex> lock(this->mutex);
 
+		// 이미 완료된 frame은 다시 만들지 않는다.
+		// RTX 등 동일 RTP timestamp를 가진 후속 패킷이
+		// 기존 FrameRecord를 덮어쓰는 것을 방지.
+		if (this->completedRecords.find(frameId) != this->completedRecords.end())
+		{
+			return;
+		}
+
 		auto& builder = this->inProgressFrames[frameId];
 
 		if (!builder.initialized)
@@ -45,6 +53,18 @@ namespace RTC
 			builder.preferredSpatialLayer = preferredSpatialLayer;
 
 			builder.pacingEnabled = pacingEnabled;
+		}
+
+		// yeon: fec
+		auto fecIt = this->pendingFecInfoByFrameId.find(frameId);
+
+		if (fecIt != this->pendingFecInfoByFrameId.end())
+		{
+			builder.hasFecRedundancy     = true;
+			builder.fecProtectionFactor  = fecIt->second.protectionFactor;
+			builder.fecRedundancyPercent = fecIt->second.redundancyPercent;
+
+			this->pendingFecInfoByFrameId.erase(fecIt);
 		}
 
 		builder.lastPacketSentAtMs = nowMs;
@@ -114,6 +134,11 @@ namespace RTC
 		// 패킷 정보도 포함
 		record.packetReceiveTimes    = builder.packetReceiveTimes;
 		record.hasPacketReceiveTimes = builder.hasPacketReceiveTimes;
+
+		// fec 관련 정보 포함
+		record.hasFecRedundancy     = builder.hasFecRedundancy;
+		record.fecProtectionFactor  = builder.fecProtectionFactor;
+		record.fecRedundancyPercent = builder.fecRedundancyPercent;
 
 		record.network = snapshot;
 
@@ -633,6 +658,41 @@ namespace RTC
 		}
 
 		return this->receiveSlackMaxMs;
+	}
+
+	void RTC::FrameRecordTable::AttachFecRedundancy(uint32_t frameId, uint8_t protectionFactor)
+	{
+		std::lock_guard<std::mutex> lock(this->mutex);
+
+		const double redundancyPercent = static_cast<double>(protectionFactor) * 100.0 / 255.0;
+
+		// 1. 이미 completed 된 frame이면 바로 저장.
+		auto completedIt = this->completedRecords.find(frameId);
+
+		if (completedIt != this->completedRecords.end())
+		{
+			completedIt->second.hasFecRedundancy     = true;
+			completedIt->second.fecProtectionFactor  = protectionFactor;
+			completedIt->second.fecRedundancyPercent = redundancyPercent;
+
+			return;
+		}
+
+		// 2. 아직 전송 중인 frame이면 builder에 저장.
+		auto progressIt = this->inProgressFrames.find(frameId);
+
+		if (progressIt != this->inProgressFrames.end())
+		{
+			progressIt->second.hasFecRedundancy     = true;
+			progressIt->second.fecProtectionFactor  = protectionFactor;
+			progressIt->second.fecRedundancyPercent = redundancyPercent;
+
+			return;
+		}
+
+		// 3. pacing 때문에 아직 첫 packet도 실제 send되지 않은 경우.
+		// 나중에 OnPacketSent()에서 가져간다.
+		this->pendingFecInfoByFrameId[frameId] = { protectionFactor, redundancyPercent };
 	}
 
 } // namespace RTC

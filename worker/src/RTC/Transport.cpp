@@ -3002,16 +3002,6 @@ namespace RTC
 				this->camelClient->InsertPacket(packetInfo, packet, consumer, DepLibUV::GetTimeMsInt64());
 			}
 
-			// 2. 여기서 최종 상태의 원본 RTP를 FEC encoder에 입력.
-			// 매 패킷마다 호출하지만, 매번 FEC가 생성되는 것은 아님.
-			// std::vector<std::unique_ptr<RTC::RtpPacket>> fecPackets;
-
-			// if (consumer->IsFecEnabled())
-			// {
-			// 	consumer->AddPacketToFecEncoder(packet);
-			// 	fecPackets = consumer->TakeGeneratedFecPackets();
-			// }
-
 			// When using WebRtcServer, the lifecycle of a RTC::UdpSocket maybe longer
 			// than WebRtcTransport so there is a chance for the send callback to be
 			// invoked *after* the WebRtcTransport has been closed (freed). To avoid
@@ -3084,12 +3074,6 @@ namespace RTC
 		}
 
 		this->sendRtpTransmission.Update(packet);
-
-		// 4. 보호 그룹이 완성된 경우에만 FEC RTP 전송.
-		// for (auto& fecPacket : fecPackets)
-		// {
-		// 	OnConsumerSendFecPacket(consumer, fecPacket.get());
-		// }
 	}
 
 	inline void Transport::OnConsumerRetransmitRtpPacket(RTC::Consumer* consumer, RTC::RtpPacket* packet)

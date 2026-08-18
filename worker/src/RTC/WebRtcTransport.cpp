@@ -42,6 +42,67 @@
 // yeon: fec
 #include <exception>
 
+// yeon: adative fec
+namespace
+{
+	// ============================================================
+	// Adaptive FEC experiment switch.
+	//
+	// true  : Slack + TWCC loss 기반 adaptive FEC
+	// false : 기존 fixed FEC (25%)
+	// ============================================================
+	static constexpr bool AdaptiveFecEnabled{ false }; // adative fec를 사용할 것인지 말지는 여기서
+	                                                  // 조절하면 된다.
+
+	// Fixed mode.
+	static constexpr uint8_t FixedFecProtectionFactor{ 64u }; // ~25%
+
+	// Adaptive FEC control.
+	static constexpr int64_t FecSlackBaselineWindowMs{ 10000 };
+	static constexpr int64_t FecSlackDecisionWindowMs{ 1000 };
+	static constexpr int64_t FecLossWindowMs{ 1000 };
+	static constexpr int64_t FecDecisionIntervalMs{ 500 };
+
+	static constexpr size_t FecMinBaselineSamples{ 20u };
+	static constexpr size_t FecMinDecisionSamples{ 5u };
+
+	// 이전 Slack layering과 동일.
+	static constexpr double FecBadSlackRatio{ 0.65 };
+	static constexpr double FecSevereSlackRatio{ 0.45 };
+
+	static constexpr size_t FecBadCountThreshold{ 3u };
+	static constexpr size_t FecSevereCountThreshold{ 2u };
+
+	static constexpr double FecBadFrameRatioThreshold{ 0.15 };
+	static constexpr double FecSevereFrameRatioThreshold{ 0.08 };
+
+	// TWCC loss.
+	static constexpr double FecMediumLossThreshold{ 0.01 }; // 1%
+	static constexpr double FecHighLossThreshold{ 0.03 };   // 3%
+
+	double FecPercentile(std::vector<double> values, double q)
+	{
+		if (values.empty())
+		{
+			return 0.0;
+		}
+
+		std::sort(values.begin(), values.end());
+
+		if (values.size() == 1u)
+		{
+			return values.front();
+		}
+
+		const double pos  = q * static_cast<double>(values.size() - 1u);
+		const auto idx    = static_cast<size_t>(pos);
+		const auto next   = std::min(idx + 1u, values.size() - 1u);
+		const double frac = pos - static_cast<double>(idx);
+
+		return values[idx] * (1.0 - frac) + values[next] * frac;
+	}
+} // namespace
+
 // ===== pacing 여부 ====
 static bool ispacing = false;
 // ===== 패킷 send 분포 로그 ====
@@ -1227,6 +1288,23 @@ namespace RTC
 		{
 			this->networkState->UpdateLossRate(loss, nowMs);
 		}
+
+		// ==================================================
+		// yeon: TWCC feedback 기반 adaptive FEC.
+		// ==================================================
+		if (AdaptiveFecEnabled)
+		{
+			this->fecLossSamples.push_back({ nowMs, loss });
+
+			while (!this->fecLossSamples.empty() &&
+			       nowMs - this->fecLossSamples.front().timeMs > FecLossWindowMs)
+			{
+				this->fecLossSamples.pop_front();
+			}
+
+			this->UpdateAdaptiveFecProtection(nowMs);
+		}
+
 		// lossDetected = loss; // setter 함수 필요 private
 		if (!this->rtpPacer || ispacing == false)
 		{
@@ -1440,6 +1518,15 @@ namespace RTC
 			if (recordOpt.has_value())
 			{
 				const auto& rec = recordOpt.value();
+
+				// yeon: adaptive fec
+				if (rec.hasDecodeSlackNominalMs)
+				{
+					this->AddFecSlackSample(
+					  rec.decodeSlackNominalMs,
+					  static_cast<int8_t>(rec.currentSpatialLayer),
+					  DepLibUV::GetTimeMsInt64());
+				}
 
 				RTC::SlackSample sample;
 				sample.frameId                    = rec.frameId;
@@ -2414,6 +2501,13 @@ namespace RTC
 
 		const auto& rtpParameters = consumer->GetRtpParameters();
 
+		const auto& headerExtensionIds = consumer->GetRtpHeaderExtensionIds();
+
+		// MS_ERROR_STD(
+		//   "[TWCC-ID] consumerId:%s transportWideCc01:%" PRIu8,
+		//   consumer->id.c_str(),
+		//   headerExtensionIds.transportWideCc01);
+
 		if (rtpParameters.encodings.empty() || consumer->GetMediaSsrcs().empty())
 		{
 			return nullptr;
@@ -2513,29 +2607,58 @@ namespace RTC
 	  RTC::Consumer* consumer, FlexFecConsumerState& state, uint32_t timestamp)
 	{
 		if (!state.encoder || state.encoder->GetBufferedPacketCount() == 0u)
-		{
+		{	
+			
 			return;
 		}
 
 		// 64 / 255 ≈ 25% 보호율.
-		constexpr uint8_t ProtectionFactor{ 64u };
+		// constexpr uint8_t ProtectionFactor{ 64u };
 
 		// 약 10%
 		// constexpr uint8_t ProtectionFactor{ 26u };
 
 		// 약 40%
-		//constexpr uint8_t ProtectionFactor{ 102u };
+		// constexpr uint8_t ProtectionFactor{ 128u };
 
+		// yeon: adaptive fec
+		const uint8_t protectionFactor =
+		  AdaptiveFecEnabled ? this->adaptiveFecProtectionFactor : FixedFecProtectionFactor;
 
 		const size_t protectedPacketCount = state.encoder->GetBufferedPacketCount();
 
-		std::vector<RTC::FlexFecEncoder::GeneratedPayload> generatedPayloads;
+		// MS_ERROR_STD(
+		//   "[FEC-FRAME] frameId:%" PRIu32 " pf:%u rate:%.2f%%",
+		//   timestamp,
+		//   static_cast<unsigned int>(protectionFactor),
+		//   static_cast<double>(protectionFactor) * 100.0 / 255.0);
 
-		if (!state.encoder->Generate(ProtectionFactor, generatedPayloads))
+		// 이 frame에 실제 적용되는 FEC redundancy를 기록.
+		if (consumer)
 		{
+			auto* table = this->GetFrameRecordTableForConsumer(consumer->id);
+
+			if (table)
+			{
+				table->AttachFecRedundancy(timestamp, protectionFactor);
+			}
+		}
+
+		// Adaptive mode에서 FEC 0%가 선택된 경우.
+		// media packet buffer는 반드시 비워줘야 한다.
+		if (protectionFactor == 0u)
+		{
+			state.encoder->Reset();
+
 			return;
 		}
 
+		std::vector<RTC::FlexFecEncoder::GeneratedPayload> generatedPayloads;
+
+		if (!state.encoder->Generate(protectionFactor, generatedPayloads))
+		{
+			return;
+		}
 		for (const auto& generatedPayload : generatedPayloads)
 		{
 			if (generatedPayload.data.empty())
@@ -2550,88 +2673,92 @@ namespace RTC
 		MS_DEBUG_TAG(
 		  rtp,
 		  "[FlexFEC] block generated "
-		  "[consumerId:%s, timestamp:%" PRIu32 ", mediaPackets:%zu, fecPackets:%zu]",
+		  "[consumerId:%s, timestamp:%" PRIu32
+		  ", mediaPackets:%zu, fecPackets:%zu, "
+		  "protectionFactor:%u, adaptive:%d]",
 		  consumer->id.c_str(),
 		  timestamp,
 		  protectedPacketCount,
-		  generatedPayloads.size());
+		  generatedPayloads.size(),
+		  static_cast<unsigned int>(protectionFactor),
+		  AdaptiveFecEnabled ? 1 : 0);
 	}
 
-	void WebRtcTransport::SendFlexFecPacket(
-	  RTC::Consumer* consumer,
-	  FlexFecConsumerState& state,
-	  const uint8_t* payload,
-	  size_t payloadLength,
-	  uint32_t timestamp)
-	{
-		if (!consumer || !payload || payloadLength == 0u)
-		{
-			return;
-		}
+	// void WebRtcTransport::SendFlexFecPacket(
+	//   RTC::Consumer* consumer,
+	//   FlexFecConsumerState& state,
+	//   const uint8_t* payload,
+	//   size_t payloadLength,
+	//   uint32_t timestamp)
+	// {
+	// 	if (!consumer || !payload || payloadLength == 0u)
+	// 	{
+	// 		return;
+	// 	}
 
-		std::vector<uint8_t> buffer(RTC::RtpPacket::HeaderSize + payloadLength, 0u);
+	// 	std::vector<uint8_t> buffer(RTC::RtpPacket::HeaderSize + payloadLength, 0u);
 
-		/*
-		 * RTP fixed header.
-		 *
-		 * V  = 2
-		 * P  = 0
-		 * X  = 0
-		 * CC = 0
-		 * M  = 0
-		 * PT = FlexFEC PT, 현재 118
-		 */
-		buffer[0] = 0x80u;
-		buffer[1] = state.payloadType & 0x7fu;
+	// 	/*
+	// 	 * RTP fixed header.
+	// 	 *
+	// 	 * V  = 2
+	// 	 * P  = 0
+	// 	 * X  = 0
+	// 	 * CC = 0
+	// 	 * M  = 0
+	// 	 * PT = FlexFEC PT, 현재 118
+	// 	 */
+	// 	buffer[0] = 0x80u;
+	// 	buffer[1] = state.payloadType & 0x7fu;
 
-		const uint16_t sequenceNumber = htons(state.nextSequenceNumber++);
+	// 	const uint16_t sequenceNumber = htons(state.nextSequenceNumber++);
 
-		const uint32_t networkTimestamp = htonl(timestamp);
+	// 	const uint32_t networkTimestamp = htonl(timestamp);
 
-		const uint32_t networkSsrc = htonl(state.flexFecSsrc);
+	// 	const uint32_t networkSsrc = htonl(state.flexFecSsrc);
 
-		std::memcpy(buffer.data() + 2u, &sequenceNumber, sizeof(sequenceNumber));
+	// 	std::memcpy(buffer.data() + 2u, &sequenceNumber, sizeof(sequenceNumber));
 
-		std::memcpy(buffer.data() + 4u, &networkTimestamp, sizeof(networkTimestamp));
+	// 	std::memcpy(buffer.data() + 4u, &networkTimestamp, sizeof(networkTimestamp));
 
-		std::memcpy(buffer.data() + 8u, &networkSsrc, sizeof(networkSsrc));
+	// 	std::memcpy(buffer.data() + 8u, &networkSsrc, sizeof(networkSsrc));
 
-		std::memcpy(buffer.data() + RTC::RtpPacket::HeaderSize, payload, payloadLength);
+	// 	std::memcpy(buffer.data() + RTC::RtpPacket::HeaderSize, payload, payloadLength);
 
-		std::unique_ptr<RTC::RtpPacket> fecPacket(RTC::RtpPacket::Parse(buffer.data(), buffer.size()));
+	// 	std::unique_ptr<RTC::RtpPacket> fecPacket(RTC::RtpPacket::Parse(buffer.data(), buffer.size()));
 
-		if (!fecPacket)
-		{
-			MS_WARN_TAG(
-			  rtp,
-			  "failed to parse generated FlexFEC RTP packet "
-			  "[consumerId:%s, payloadLength:%zu]",
-			  consumer->id.c_str(),
-			  payloadLength);
+	// 	if (!fecPacket)
+	// 	{
+	// 		MS_WARN_TAG(
+	// 		  rtp,
+	// 		  "failed to parse generated FlexFEC RTP packet "
+	// 		  "[consumerId:%s, payloadLength:%zu]",
+	// 		  consumer->id.c_str(),
+	// 		  payloadLength);
 
-			return;
-		}
+	// 		return;
+	// 	}
 
-		/*
-		 * 일반 SendRtpPacket()으로 재진입하지 않는다.
-		 *
-		 * 이유:
-		 * - FEC를 다시 FEC encoder에 넣는 재귀 방지
-		 * - Slack/frame 통계에 FEC 패킷이 섞이는 것 방지
-		 *
-		 * 단, 원본 미디어와 동일하게 pacer와 SRTP 전송 경로는 거친다.
-		 */
-		if (this->rtpPacer && ispacing)
-		{
-			// Enqueue() 내부에서 패킷을 clone하므로
-			// 이 함수의 지역 buffer 수명과 무관하다.
-			this->rtpPacer->Enqueue(consumer, fecPacket.get(), nullptr);
-		}
-		else
-		{
-			SendRtpPacketNow(consumer, fecPacket.get(), nullptr);
-		}
-	}
+	// 	/*
+	// 	 * 일반 SendRtpPacket()으로 재진입하지 않는다.
+	// 	 *
+	// 	 * 이유:
+	// 	 * - FEC를 다시 FEC encoder에 넣는 재귀 방지
+	// 	 * - Slack/frame 통계에 FEC 패킷이 섞이는 것 방지
+	// 	 *
+	// 	 * 단, 원본 미디어와 동일하게 pacer와 SRTP 전송 경로는 거친다.
+	// 	 */
+	// 	if (this->rtpPacer && ispacing)
+	// 	{
+	// 		// Enqueue() 내부에서 패킷을 clone하므로
+	// 		// 이 함수의 지역 buffer 수명과 무관하다.
+	// 		this->rtpPacer->Enqueue(consumer, fecPacket.get(), nullptr);
+	// 	}
+	// 	else
+	// 	{
+	// 		SendRtpPacketNow(consumer, fecPacket.get(), nullptr);
+	// 	}
+	// }
 
 	// void WebRtcTransport::ProcessMediaPacketForFlexFec(RTC::Consumer* consumer, RTC::RtpPacket* packet)
 	// {
@@ -2694,6 +2821,138 @@ namespace RTC
 	// 		state->frameInitialized = false;
 	// 	}
 	// }
+
+	void WebRtcTransport::SendFlexFecPacket(
+	  RTC::Consumer* consumer,
+	  FlexFecConsumerState& state,
+	  const uint8_t* payload,
+	  size_t payloadLength,
+	  uint32_t timestamp)
+	{
+		if (!consumer || !payload || payloadLength == 0u)
+		{
+			return;
+		}
+
+		const auto& extensionIds = consumer->GetRtpHeaderExtensionIds();
+		const uint8_t twccId     = extensionIds.transportWideCc01;
+
+		const bool useTransportCc = this->tccClient &&
+		                            this->tccClient->GetBweType() == RTC::BweType::TRANSPORT_CC &&
+		                            twccId != 0u && twccId <= 14u;
+
+		const uint16_t wideSeq =
+		  useTransportCc ? static_cast<uint16_t>(this->transportWideCcSeq + 1u) : 0u;
+
+		const size_t extensionSize = useTransportCc ? 8u : 0u;
+		const size_t rtpHeaderSize = RTC::RtpPacket::HeaderSize + extensionSize;
+
+		std::vector<uint8_t> buffer(rtpHeaderSize + payloadLength, 0u);
+
+		// RTP V=2.
+		// TWCC가 있으면 X=1.
+		buffer[0] = useTransportCc ? 0x90u : 0x80u;
+		buffer[1] = state.payloadType & 0x7fu;
+
+		const uint16_t sequenceNumber   = htons(state.nextSequenceNumber++);
+		const uint32_t networkTimestamp = htonl(timestamp);
+		const uint32_t networkSsrc      = htonl(state.flexFecSsrc);
+
+		std::memcpy(buffer.data() + 2u, &sequenceNumber, sizeof(sequenceNumber));
+		std::memcpy(buffer.data() + 4u, &networkTimestamp, sizeof(networkTimestamp));
+		std::memcpy(buffer.data() + 8u, &networkSsrc, sizeof(networkSsrc));
+
+		if (useTransportCc)
+		{
+			// RFC 8285 one-byte RTP header extension.
+			buffer[12] = 0xBEu;
+			buffer[13] = 0xDEu;
+
+			// Extension data = 1 x 32-bit word.
+			buffer[14] = 0x00u;
+			buffer[15] = 0x01u;
+
+			// One-byte extension element:
+			// high 4 bits = extension ID
+			// low 4 bits  = data length - 1
+			// TWCC data는 2 bytes이므로 low bits = 1.
+			buffer[16] = static_cast<uint8_t>((twccId << 4) | 0x01u);
+
+			const uint16_t networkWideSeq = htons(wideSeq);
+			std::memcpy(buffer.data() + 17u, &networkWideSeq, sizeof(networkWideSeq));
+
+			// buffer[19] = padding, 이미 0.
+		}
+
+		std::memcpy(buffer.data() + rtpHeaderSize, payload, payloadLength);
+
+		std::unique_ptr<RTC::RtpPacket> fecPacket(RTC::RtpPacket::Parse(buffer.data(), buffer.size()));
+
+		if (!fecPacket)
+		{
+			MS_WARN_TAG(rtp, "failed to parse generated FlexFEC RTP packet");
+			return;
+		}
+
+		// 아래에 GCC accounting 추가 ...
+
+		const RTC::Transport::onSendCallback* sendCb{ nullptr };
+
+		if (useTransportCc)
+		{
+			// 이제 이 번호를 transport 전체 TWCC sequence로 확정.
+			this->transportWideCcSeq = wideSeq;
+
+			webrtc::RtpPacketSendInfo packetInfo;
+
+			packetInfo.ssrc                      = fecPacket->GetSsrc();
+			packetInfo.transport_sequence_number = wideSeq;
+			packetInfo.has_rtp_sequence_number   = true;
+			packetInfo.rtp_sequence_number       = fecPacket->GetSequenceNumber();
+			packetInfo.length                    = fecPacket->GetSize();
+			packetInfo.pacing_info               = this->tccClient->GetPacingInfo();
+
+			this->tccClient->InsertPacket(packetInfo);
+
+			// MS_ERROR_STD(
+			//   "[FEC-TWCC][INSERT] rtpSeq:%" PRIu16 " wideSeq:%" PRIu16 " size:%zu",
+			//   packetInfo.rtp_sequence_number,
+			//   packetInfo.transport_sequence_number,
+			//   packetInfo.length);
+
+			const std::weak_ptr<RTC::TransportCongestionControlClient> tccClientWeakPtr(this->tccClient);
+
+			sendCb = new RTC::Transport::onSendCallback(
+			  [tccClientWeakPtr, packetInfo](bool sent)
+			  {
+				  if (!sent)
+				  {
+					  return;
+				  }
+
+				  auto tccClient = tccClientWeakPtr.lock();
+
+				  if (tccClient)
+				  {
+					  tccClient->PacketSent(packetInfo, DepLibUV::GetTimeMsInt64());
+					  //   MS_ERROR_STD(
+					  //     "[FEC-TWCC][SENT] rtpSeq:%" PRIu16 " wideSeq:%" PRIu16 " size:%zu",
+					  //     packetInfo.rtp_sequence_number,
+					  //     packetInfo.transport_sequence_number,
+					  //     packetInfo.length);
+				  }
+			  });
+		}
+
+		if (this->rtpPacer && ispacing)
+		{
+			this->rtpPacer->Enqueue(consumer, fecPacket.get(), sendCb);
+		}
+		else
+		{
+			SendRtpPacketNow(consumer, fecPacket.get(), sendCb);
+		}
+	}
 
 	WebRtcTransport::FlexFecConsumerState* WebRtcTransport::CollectMediaPacketForFlexFec(
 	  RTC::Consumer* consumer, RTC::RtpPacket* packet)
@@ -2864,7 +3123,7 @@ namespace RTC
 		}
 
 		/*
-		 * 현재 미디어 RTP를 FEC encoder 내부에 복사한다.
+		 * 현재 미디어 RTP를 FEC encoder 내부에 복사
 		 *
 		 * marker 패킷이면 flexFecStateToGenerate가 non-null이지만,
 		 * 아직 EncodeFec()는 수행하지 않는다.
@@ -3002,10 +3261,18 @@ namespace RTC
 
 		this->iceServer->GetSelectedTuple()->Send(data, len, cb);
 
+		// fec problem: 자꾸 rtx같은 패킷으로 인해 기존 프레임 레코드가 초기값으로 덮어씌워짐 그걸 방지
+		bool isOriginalMediaPacket = true;
+
+		auto fecStateIt = this->flexFecStatesByConsumerId.find(consumer->id);
+
+		if (fecStateIt != this->flexFecStatesByConsumerId.end())
+		{
+			isOriginalMediaPacket = (packet->GetSsrc() == fecStateIt->second.mediaSsrc);
+		}
+
 		// ---- frame record store begin ----
-		if (
-		  !IsFlexFecPacket(consumer, packet) && consumer &&
-		  consumer->GetKind() == RTC::Media::Kind::VIDEO && this->networkState)
+		if (consumer && consumer->GetKind() == RTC::Media::Kind::VIDEO && this->networkState && isOriginalMediaPacket)
 		{
 			const std::string& transportId = this->id;
 			const std::string& consumerId  = consumer->id;
@@ -3894,4 +4161,282 @@ namespace RTC
 		// Pass it to the parent transport.
 		RTC::Transport::ReceiveSctpData(data, len);
 	}
+
+	void RTC::WebRtcTransport::AddFecSlackSample(double slackMs, int8_t spatialLayer, int64_t nowMs)
+	{
+		if (!std::isfinite(slackMs))
+		{
+			return;
+		}
+
+		if (slackMs < -10000.0 || slackMs > 100000.0)
+		{
+			return;
+		}
+
+		if (spatialLayer < 0)
+		{
+			return;
+		}
+
+		this->fecSlackSamples.push_back({ nowMs, slackMs, spatialLayer });
+
+		while (!this->fecSlackSamples.empty() &&
+		       nowMs - this->fecSlackSamples.front().timeMs > FecSlackBaselineWindowMs)
+		{
+			this->fecSlackSamples.pop_front();
+		}
+	}
+
+	RTC::WebRtcTransport::FecSlackState RTC::WebRtcTransport::EvaluateFecSlackState(
+	  int64_t nowMs, double& baselineSlackMs, double& badFrameRatio, double& severeFrameRatio)
+	{
+		baselineSlackMs  = 0.0;
+		badFrameRatio    = 0.0;
+		severeFrameRatio = 0.0;
+
+		if (this->fecSlackSamples.empty())
+		{
+			return FecSlackState::INSUFFICIENT;
+		}
+
+		// 가장 최근 Slack sample의 spatial layer를 현재 layer로 간주.
+		const int8_t currentSpatialLayer = this->fecSlackSamples.back().spatialLayer;
+
+		std::vector<double> baselineValues;
+		std::vector<double> decisionValues;
+
+		for (const auto& sample : this->fecSlackSamples)
+		{
+			// Layer가 바뀌면 Slack 분포 자체가 달라질 수 있으므로
+			// 현재 layer와 같은 sample을 우선 사용.
+			if (sample.spatialLayer != currentSpatialLayer)
+			{
+				continue;
+			}
+
+			baselineValues.emplace_back(sample.slackMs);
+
+			if (nowMs - sample.timeMs <= FecSlackDecisionWindowMs)
+			{
+				decisionValues.emplace_back(sample.slackMs);
+			}
+		}
+
+		// 이전 layering과 동일하게 초기 sample 부족 시
+		// baseline만 전체 layer sample로 fallback.
+		if (baselineValues.size() < FecMinBaselineSamples)
+		{
+			baselineValues.clear();
+
+			for (const auto& sample : this->fecSlackSamples)
+			{
+				baselineValues.emplace_back(sample.slackMs);
+			}
+		}
+
+		if (baselineValues.size() < FecMinBaselineSamples)
+		{
+			return FecSlackState::INSUFFICIENT;
+		}
+
+		if (decisionValues.size() < FecMinDecisionSamples)
+		{
+			return FecSlackState::INSUFFICIENT;
+		}
+
+		baselineSlackMs = FecPercentile(baselineValues, 0.80);
+
+		if (!std::isfinite(baselineSlackMs) || baselineSlackMs <= 0.0)
+		{
+			return FecSlackState::INSUFFICIENT;
+		}
+
+		const double badThreshold = baselineSlackMs * FecBadSlackRatio;
+
+		const double severeThreshold = baselineSlackMs * FecSevereSlackRatio;
+
+		size_t badCount{ 0u };
+		size_t severeCount{ 0u };
+
+		for (const auto slackMs : decisionValues)
+		{
+			if (slackMs < badThreshold)
+			{
+				badCount++;
+			}
+
+			if (slackMs < severeThreshold)
+			{
+				severeCount++;
+			}
+		}
+
+		badFrameRatio = static_cast<double>(badCount) / static_cast<double>(decisionValues.size());
+
+		severeFrameRatio = static_cast<double>(severeCount) / static_cast<double>(decisionValues.size());
+
+		const double shortP10SlackMs = FecPercentile(decisionValues, 0.10);
+
+		if (severeCount >= FecSevereCountThreshold || severeFrameRatio >= FecSevereFrameRatioThreshold || shortP10SlackMs < severeThreshold)
+		{
+			return FecSlackState::SEVERE;
+		}
+
+		if (badCount >= FecBadCountThreshold || badFrameRatio >= FecBadFrameRatioThreshold || shortP10SlackMs < badThreshold)
+		{
+			return FecSlackState::BAD;
+		}
+
+		return FecSlackState::NORMAL;
+	}
+
+	double RTC::WebRtcTransport::GetRecentFecLossRate(int64_t nowMs)
+	{
+		while (!this->fecLossSamples.empty() &&
+		       nowMs - this->fecLossSamples.front().timeMs > FecLossWindowMs)
+		{
+			this->fecLossSamples.pop_front();
+		}
+
+		if (this->fecLossSamples.empty())
+		{
+			return 0.0;
+		}
+
+		double sum{ 0.0 };
+
+		for (const auto& sample : this->fecLossSamples)
+		{
+			sum += sample.lossRate;
+		}
+
+		return sum / static_cast<double>(this->fecLossSamples.size());
+	}
+
+	void RTC::WebRtcTransport::UpdateAdaptiveFecProtection(int64_t nowMs)
+	{
+		if (!AdaptiveFecEnabled)
+		{
+			return;
+		}
+
+		// 최대 500ms마다 한 번만 결정.
+		if (this->lastFecDecisionMs != 0 && nowMs - this->lastFecDecisionMs < FecDecisionIntervalMs)
+		{
+			return;
+		}
+
+		this->lastFecDecisionMs = nowMs;
+
+		const double lossRate = GetRecentFecLossRate(nowMs);
+
+		double baselineSlackMs{ 0.0 };
+		double badFrameRatio{ 0.0 };
+		double severeFrameRatio{ 0.0 };
+
+		const auto slackState =
+		  EvaluateFecSlackState(nowMs, baselineSlackMs, badFrameRatio, severeFrameRatio);
+
+		// Slack baseline이 아직 안 만들어졌으면
+		// 기존 25%를 그대로 유지.
+		if (slackState == FecSlackState::INSUFFICIENT)
+		{
+			return;
+		}
+
+		uint8_t newProtectionFactor{ 64u };
+
+		// -------------------------------------------------
+		// Slack NORMAL
+		// loss low    -> 0%
+		// loss medium -> 12.5%
+		// loss high   -> 25%
+		// -------------------------------------------------
+		if (slackState == FecSlackState::NORMAL)
+		{
+			if (lossRate >= FecHighLossThreshold)
+			{
+				newProtectionFactor = 64u;
+			}
+			else if (lossRate >= FecMediumLossThreshold)
+			{
+				newProtectionFactor = 32u;
+			}
+			else
+			{
+				newProtectionFactor = 0u;
+			}
+		}
+		// -------------------------------------------------
+		// Slack BAD
+		// low    -> 12.5%
+		// medium -> 25%
+		// high   -> 37.5%
+		// -------------------------------------------------
+		else if (slackState == FecSlackState::BAD)
+		{
+			if (lossRate >= FecHighLossThreshold)
+			{
+				newProtectionFactor = 96u;
+			}
+			else if (lossRate >= FecMediumLossThreshold)
+			{
+				newProtectionFactor = 64u;
+			}
+			else
+			{
+				newProtectionFactor = 32u;
+			}
+		}
+		// -------------------------------------------------
+		// Slack SEVERE
+		// low    -> 25%
+		// medium -> 37.5%
+		// high   -> 50%
+		// -------------------------------------------------
+		else
+		{
+			if (lossRate >= FecHighLossThreshold)
+			{
+				newProtectionFactor = 128u;
+			}
+			else if (lossRate >= FecMediumLossThreshold)
+			{
+				newProtectionFactor = 96u;
+			}
+			else
+			{
+				newProtectionFactor = 64u;
+			}
+		}
+
+		if (newProtectionFactor == this->adaptiveFecProtectionFactor)
+		{
+			return;
+		}
+
+		const auto oldProtectionFactor = this->adaptiveFecProtectionFactor;
+
+		this->adaptiveFecProtectionFactor = newProtectionFactor;
+
+		// protectionFactor는 0~255 scale.
+		const double oldRedundancyPercent = static_cast<double>(oldProtectionFactor) * 100.0 / 255.0;
+
+		const double newRedundancyPercent = static_cast<double>(newProtectionFactor) * 100.0 / 255.0;
+
+		// MS_WARN_TAG(
+		//   bwe,
+		//   "[ADAPTIVE-FEC] redundancy changed "
+		//   "[old:%.1f%%, new:%.1f%%, loss:%.2f%%, baselineP80:%.2f, "
+		//   "badRatio:%.1f%%, severeRatio:%.1f%%, slackState:%d]",
+		//   oldRedundancyPercent,
+		//   newRedundancyPercent,
+		//   lossRate * 100.0,
+		//   baselineSlackMs,
+		//   badFrameRatio * 100.0,
+		//   severeFrameRatio * 100.0,
+		//   static_cast<int>(slackState));
+	}
+
 } // namespace RTC

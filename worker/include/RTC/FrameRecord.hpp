@@ -128,6 +128,12 @@ namespace RTC
 
 		// yeon: Camel burst length controller output.
 		uint32_t camelBurstLengthBytes{ 0u };
+
+		// yeon: FEC.
+		bool hasFecRedundancy{ false };
+
+		uint8_t fecProtectionFactor{ 0u };
+		double fecRedundancyPercent{ 0.0 };
 	};
 
 	struct FrameBuilder
@@ -161,6 +167,12 @@ namespace RTC
 
 		bool hasPacketReceiveTimes{ false };
 		std::vector<PacketReceiveInfo> packetReceiveTimes;
+
+		// yeon: fec
+		bool hasFecRedundancy{ false };
+
+		uint8_t fecProtectionFactor{ 0u };
+		double fecRedundancyPercent{ 0.0 };
 	};
 
 	class FrameRecordTable
@@ -230,6 +242,18 @@ namespace RTC
 		double GetAverageReceiveSlackMs() const;
 		double GetMinReceiveSlackMs() const;
 		double GetMaxReceiveSlackMs() const;
+
+
+		// yeon: fec
+		void AttachFecRedundancy(uint32_t frameId, uint8_t protectionFactor);
+
+		struct PendingFecInfo
+		{
+			uint8_t protectionFactor{ 0u };
+			double redundancyPercent{ 0.0 };
+		};
+
+		std::unordered_map<uint32_t, PendingFecInfo> pendingFecInfoByFrameId;
 
 	private:
 		void FinalizeFrame(uint32_t frameId, uint64_t nowMs, const NetworkSnapshot& snapshot);

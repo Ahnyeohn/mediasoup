@@ -17,7 +17,7 @@
 
 ## Worker.
 /worker/scripts/node_modules
-# Flatc generated files.
+# Flatc generated files.dhzpdl
 /worker/include/FBS
 /worker/prebuild
 # Python invoke.

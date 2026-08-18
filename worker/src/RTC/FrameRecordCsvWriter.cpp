@@ -46,6 +46,9 @@ namespace RTC
 			          << "currentSpatialLayer, "
 			          << "targetSpatialLayer, "
 			          << "preferredSpatialLayer, "
+					  
+			          << "fecProtectionFactor,"
+			          << "fecRedundancyPercent,"
 
 			          << "rttMs, "
 			          << "lossRate, "
@@ -107,10 +110,9 @@ namespace RTC
 		                     : NAN;
 
 		this->out
-		  << record.transportId << "," 
-		  << record.consumerId << "," 
-		  << record.producerId << "," 
-		  << record.frameId << ", "
+		  << record.transportId << "," << record.consumerId << "," << record.producerId << ","
+		  << record.frameId
+		  << ", "
 		  //   << record.firstPacketSentAtMs << ","
 		  //   << record.lastPacketSentAtMs << ","
 		  //   << record.frameSizeBytes << ","
@@ -120,8 +122,12 @@ namespace RTC
 		  //   << static_cast<uint32_t>(record.temporalLayer) << ","
 
 		  //<< static_cast<uint32_t>(record.SpatialLayer) << ","
-		  << record.currentSpatialLayer << ", " << record.targetSpatialLayer << ", "
+		  << record.currentSpatialLayer << ", " 
+		  << record.targetSpatialLayer << ", "
 		  << record.preferredSpatialLayer << ", "
+
+		  << static_cast<unsigned int>(record.fecProtectionFactor) << "," << std::fixed
+		  << std::setprecision(2) << record.fecRedundancyPercent << ","
 
 		  << record.network.rttMs << ", " << record.network.lossRate << ", "
 		  << record.network.availableBitratebps << ", " << record.network.gccAvailableBitrateBps << ", "
