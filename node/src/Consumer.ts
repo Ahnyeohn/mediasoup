@@ -271,7 +271,7 @@ export class ConsumerImpl<ConsumerAppData extends AppData = AppData>
 	}
 
 	async getStats(): Promise<(ConsumerStat | ProducerStat)[]> {
-		logger.debug('getStats()');
+		//logger.debug('getStats()');
 
 		const response = await this.#channel.request(
 			FbsRequest.Method.CONSUMER_GET_STATS,

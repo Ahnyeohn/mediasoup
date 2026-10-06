@@ -274,6 +274,10 @@ namespace RTC
 			void SetLinkCapacityBytesPerMs(double value);
 			void SetLossDetected(double value);
 
+			// yeon: 현재 decision 시점까지 refill을 가상으로 반영한 effectiveTokensBytes 반환하여 pacing
+			// delay 예측
+			RTC::PacerSnapshot GetPredictionSnapshot(uint64_t nowMs) const;
+
 		private:
 			void EnsureTimer();
 			void PacerTimer(uint64_t delayMs);
@@ -358,6 +362,21 @@ namespace RTC
 		void OnAvailableBitrateChanged(uint32_t availableBitrate) override;
 		void OnPacketLossDetected(double loss) override;
 		void OnRttUpdated(double rttMs) override;
+
+		bool OnConsumerGetNetworkSnapshot(RTC::Consumer* consumer, RTC::NetworkSnapshot& snapshot) override;
+		bool OnConsumerGetPacerSnapshot(
+		  RTC::Consumer* consumer, uint64_t nowMs, RTC::PacerSnapshot& snapshot) override;
+		void OnConsumerSetSlackActionDecision(
+		  RTC::Consumer* consumer, const RTC::SlackActionDecision& decision) override;
+		bool OnConsumerPredictSlack(
+		  RTC::Consumer* consumer,
+		  const RTC::SlackFeature& feature,
+		  const RTC::SlackActionIdentity& action,
+		  RTC::SlackPrediction& prediction) override;
+		bool OnConsumerGetSlackRuntimeActionState(
+		  RTC::Consumer* consumer, RTC::SlackRuntimeActionState& state) override;
+		void OnConsumerSetColdStartPacing(RTC::Consumer* consumer, bool enabled) override;
+
 		void OnSlack(const uint8_t* msg, size_t len) override;
 		uint32_t GetAceBucketSizeBytes() const override;
 
@@ -375,12 +394,9 @@ namespace RTC
 		// 브라우저 telemetry에는 consumerId가 없으므로 OnSlack에서 이 map으로 찾음.
 		std::unordered_map<uint32_t, std::string> frameConsumerIdByRtpTimestamp;
 
-		// predicted slack도 consumerId + frameId 기준으로 관리.
-		std::unordered_map<std::string, std::unordered_map<uint32_t, double>> pendingPredictedSlackByConsumerFrame;
-
-		// 새 frame 감지도 consumer별로 관리.
-		std::unordered_map<std::string, bool> predictFrameInitByConsumerId;
-		std::unordered_map<std::string, uint32_t> currentPredictFrameTimestampByConsumerId;
+		// slack action 결정 데이터를 pending으로 관리
+		std::unordered_map<std::string, std::unordered_map<uint32_t, RTC::SlackActionDecision>>
+		  pendingSlackActionDecisionByConsumer;
 
 		// yeon: fec
 		// yeon: Consumer별 FlexFEC 송신 상태.
@@ -394,13 +410,20 @@ namespace RTC
 			bool frameInitialized{ false };
 			uint32_t currentTimestamp{ 0u };
 
+			// yeon: 한 frame이 시작할 때 결정된 FEC protection factor.
+			uint8_t currentFrameProtectionFactor{ 64u };
+			bool currentFramePacingEnabled{ false };
 			std::unique_ptr<RTC::FlexFecEncoder> encoder;
 		};
 
 		FlexFecConsumerState* GetOrCreateFlexFecState(RTC::Consumer* consumer);
 
 		// void ProcessMediaPacketForFlexFec(RTC::Consumer* consumer, RTC::RtpPacket* packet);
-		FlexFecConsumerState* CollectMediaPacketForFlexFec(RTC::Consumer* consumer, RTC::RtpPacket* packet);
+		FlexFecConsumerState* CollectMediaPacketForFlexFec(
+		  RTC::Consumer* consumer,
+		  RTC::RtpPacket* packet,
+		  uint8_t frameProtectionFactor,
+		  bool framePacingEnabled);
 
 		void GenerateAndSendFlexFecBlock(
 		  RTC::Consumer* consumer, FlexFecConsumerState& state, uint32_t timestamp);
@@ -410,7 +433,8 @@ namespace RTC
 		  FlexFecConsumerState& state,
 		  const uint8_t* payload,
 		  size_t payloadLength,
-		  uint32_t timestamp);
+		  uint32_t timestamp,
+		  bool pacingEnabled);
 
 		bool IsFlexFecPacket(const RTC::Consumer* consumer, const RTC::RtpPacket* packet) const;
 
@@ -418,11 +442,14 @@ namespace RTC
 
 		// Helper: actual immediate send path (your existing code moved here)
 		void SendRtpPacketNow(
-		  RTC::Consumer* consumer, RTC::RtpPacket* packet, const RTC::Transport::onSendCallback* cb);
+		  RTC::Consumer* consumer,
+		  RTC::RtpPacket* packet,
+		  const RTC::Transport::onSendCallback* cb,
+		  bool pacingApplied);
 
-		void PredictSlack(RTC::RtpPacket* packet);
-		void PredictSlack(RTC::Consumer* consumer, RTC::RtpPacket* packet);
 		FrameRecordTable* GetFrameRecordTableForConsumer(const std::string& consumerId);
+
+		uint8_t GetCurrentFecProtectionFactor() const;
 		//------// pacing으로 추가한 부분
 		// yeon: deadline slack
 	public:
@@ -431,10 +458,6 @@ namespace RTC
 		std::shared_ptr<RTC::FrameRecordTable> frameRecordTable;
 		std::unique_ptr<RTC::FrameRecordCsvWriter> frameRecordCsvWriter;
 		std::unique_ptr<RTC::FramePacketCsvWriter> framePacketCsvWriter;
-
-		// yeon: multi viewer
-	private:
-		std::optional<double> currentPredictedSlack;
 
 		// yeon: adaptive FEC.
 	private:
@@ -476,6 +499,18 @@ namespace RTC
 		uint8_t adaptiveFecProtectionFactor{ 64u };
 
 		int64_t lastFecDecisionMs{ 0 };
+
+	private:
+		std::unordered_map<std::string, std::unordered_map<uint32_t, RTC::SlackActionDecision>>
+		  activeSlackActionByConsumerFrame;
+		// ============================================================
+		// KNN experiment termination event guard.
+		//
+		// 마지막 frame CSV가 기록된 뒤
+		// [KNN-EXPERIMENT-COMPLETE]를 딱 한 번만 출력.
+		// ============================================================
+
+		bool knnExperimentCompleteEventEmitted{ false };
 	};
 
 } // namespace RTC

@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 
+#include "RTC/NetworkState.hpp"
+#include "RTC/SlackPredictor.hpp"
 #include <deque>
 
 namespace RTC
@@ -50,6 +52,29 @@ namespace RTC
 			virtual void OnConsumerNeedBitrateChange(RTC::Consumer* consumer)                      = 0;
 			virtual void OnConsumerNeedZeroBitrate(RTC::Consumer* consumer)                        = 0;
 			virtual void OnConsumerProducerClosed(RTC::Consumer* consumer)                         = 0;
+
+			// yeon: network state를 SimulcastConsumer에서 가져오기
+			virtual bool OnConsumerGetNetworkSnapshot(
+			  RTC::Consumer* consumer, RTC::NetworkSnapshot& snapshot) = 0;
+
+			// yeon: pacer state를 SimulcastConsumer가 가져오기
+			virtual bool OnConsumerGetPacerSnapshot(
+			  RTC::Consumer* consumer, uint64_t nowMs, RTC::PacerSnapshot& snapshot) = 0;
+
+			virtual void OnConsumerSetSlackActionDecision(
+			  RTC::Consumer* consumer, const RTC::SlackActionDecision& decision) = 0;
+
+			virtual bool OnConsumerPredictSlack(
+			  RTC::Consumer* consumer,
+			  const RTC::SlackFeature& feature,
+			  const RTC::SlackActionIdentity& action,
+			  RTC::SlackPrediction& prediction) = 0;
+
+			virtual bool OnConsumerGetSlackRuntimeActionState(
+			  RTC::Consumer* consumer, RTC::SlackRuntimeActionState& state) = 0;
+
+			// yeon: Cold Start 구간에서 실제 WebRtcTransport pacing 상태 변경.
+			virtual void OnConsumerSetColdStartPacing(RTC::Consumer* consumer, bool enabled) = 0;
 		};
 
 	private:

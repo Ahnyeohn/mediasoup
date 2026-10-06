@@ -389,7 +389,7 @@ std::vector<ProbeClusterConfig> ProbeController::Process(int64_t at_time_ms) {
     mid_call_probing_waiting_for_result_ = false;
 
     if (state_ == State::kWaitingForProbingResult) {
-      MS_WARN_TAG(bwe, "kWaitingForProbingResult: timeout");
+      // MS_WARN_TAG(bwe, "kWaitingForProbingResult: timeout");
       state_ = State::kProbingComplete;
       min_bitrate_to_probe_further_bps_ = kExponentialProbingDisabled;
     }

@@ -197,6 +197,7 @@ namespace RTC
 		void ReceiveSctpData(const uint8_t* data, size_t len);
 		RTC::Producer* GetProducerById(const std::string& producerId) const;
 		RTC::Consumer* GetConsumerById(const std::string& consumerId) const;
+		RTC::Consumer* FindConsumerById(const std::string& consumerId) const;
 		RTC::Consumer* GetConsumerByMediaSsrc(uint32_t ssrc) const;
 		RTC::Consumer* GetConsumerByRtxSsrc(uint32_t ssrc) const;
 		RTC::DataProducer* GetDataProducerById(const std::string& dataProducerId) const;
@@ -268,6 +269,25 @@ namespace RTC
 		void OnConsumerNeedZeroBitrate(RTC::Consumer* consumer) override;
 		void OnConsumerProducerClosed(RTC::Consumer* consumer) override;
 
+		// yeon: network state를 SimulcastConsumer에서 가져오기
+		bool OnConsumerGetNetworkSnapshot(RTC::Consumer* consumer, RTC::NetworkSnapshot& snapshot) override;
+		// yeon: pacer state를 SimulcastConsumer에서 가져오기
+		bool OnConsumerGetPacerSnapshot(
+		  RTC::Consumer* consumer, uint64_t nowMs, RTC::PacerSnapshot& snapshot) override;
+		void OnConsumerSetSlackActionDecision(
+		  RTC::Consumer* consumer, const RTC::SlackActionDecision& decision) override;
+
+		bool OnConsumerPredictSlack(
+			  RTC::Consumer* consumer,
+			  const RTC::SlackFeature& feature,
+			  const RTC::SlackActionIdentity& action,
+			  RTC::SlackPrediction& prediction) override;
+
+		bool OnConsumerGetSlackRuntimeActionState(
+		  RTC::Consumer* consumer, RTC::SlackRuntimeActionState& state) override;
+
+		void OnConsumerSetColdStartPacing(RTC::Consumer* consumer, bool enabled) override;
+
 		/* Pure virtual methods inherited from RTC::DataProducer::Listener. */
 	public:
 		void OnDataProducerReceiveData(RTC::DataProducer* /*dataProducer*/, size_t len) override
@@ -313,10 +333,8 @@ namespace RTC
 
 		/* Pure virtual methods inherited from RTC::TransportCongestionControlClient::Listener. */
 	public:
-		void ApplySelectedOutgoingBitrate(
-		  RTC::TransportCongestionControlClient::Bitrates& bitrates);
-		void ApplySelectedOutgoingBitrate(
-		  RTC::CamelCongestionControlClient::Bitrates& bitrates);
+		void ApplySelectedOutgoingBitrate(RTC::TransportCongestionControlClient::Bitrates& bitrates);
+		void ApplySelectedOutgoingBitrate(RTC::CamelCongestionControlClient::Bitrates& bitrates);
 		void OnTransportCongestionControlClientBitrates(
 		  RTC::TransportCongestionControlClient* tccClient,
 		  RTC::TransportCongestionControlClient::Bitrates& bitrates) override;
@@ -422,6 +440,7 @@ namespace RTC
 		}
 
 	private:
+		// yeon: gcc를 기본 비트레이트 계산으로 사용
 		OutgoingBweAlgorithm outgoingBweAlgorithm{ OutgoingBweAlgorithm::Gcc };
 		uint32_t GetSelectedAvailableOutgoingBitrate() const;
 

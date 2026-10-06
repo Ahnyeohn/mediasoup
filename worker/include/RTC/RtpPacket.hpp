@@ -19,6 +19,92 @@ namespace RTC
 	class RtpPacket : public Codecs::DependencyDescriptor::Listener
 	{
 	public:
+		// yeon: frame size metadata
+		struct FrameMeta
+		{
+			bool valid{ false };
+
+			// sender transform이 부여한 encoded-frame ID.
+			uint32_t frameId{ 0 };
+
+			// sender encoder에서 측정한 encoded frame size.
+			uint32_t frameSizeBytes{ 0 };
+
+			// 세 simulcast encoding을 같은 source frame으로 묶는 ID.
+			uint32_t logicalFrameId{ 0 };
+		};
+
+		struct Vp8PictureIdTrace
+		{
+			bool valid{ false };
+
+			bool hasIncomingPictureId{ false };
+			uint16_t incomingPictureId{ 0u };
+
+			bool hasOutgoingPictureId{ false };
+			uint16_t outgoingPictureId{ 0u };
+
+			bool hasTl0PictureIndex{ false };
+
+			bool pictureIdSyncApplied{ false };
+			bool pictureIdRewriteApplied{ false };
+		};
+
+		void SetVp8PictureIdTrace(
+		  bool hasIncomingPictureId,
+		  uint16_t incomingPictureId,
+		  bool hasOutgoingPictureId,
+		  uint16_t outgoingPictureId,
+		  bool hasTl0PictureIndex,
+		  bool pictureIdSyncApplied,
+		  bool pictureIdRewriteApplied)
+		{
+			this->vp8PictureIdTrace.valid = true;
+
+			this->vp8PictureIdTrace.hasIncomingPictureId = hasIncomingPictureId;
+			this->vp8PictureIdTrace.incomingPictureId    = incomingPictureId;
+
+			this->vp8PictureIdTrace.hasOutgoingPictureId = hasOutgoingPictureId;
+			this->vp8PictureIdTrace.outgoingPictureId    = outgoingPictureId;
+
+			this->vp8PictureIdTrace.hasTl0PictureIndex      = hasTl0PictureIndex;
+			this->vp8PictureIdTrace.pictureIdSyncApplied    = pictureIdSyncApplied;
+			this->vp8PictureIdTrace.pictureIdRewriteApplied = pictureIdRewriteApplied;
+		}
+
+		const Vp8PictureIdTrace& GetVp8PictureIdTrace() const
+		{
+			return this->vp8PictureIdTrace;
+		}
+
+		void SetFrameMeta(uint32_t frameId, uint32_t frameSizeBytes, uint32_t logicalFrameId)
+		{
+			this->frameMeta.valid          = true;
+			this->frameMeta.frameId        = frameId;
+			this->frameMeta.frameSizeBytes = frameSizeBytes;
+			this->frameMeta.logicalFrameId = logicalFrameId;
+		}
+
+		bool HasFrameMeta() const
+		{
+			return this->frameMeta.valid;
+		}
+
+		uint32_t GetFrameMetaFrameId() const
+		{
+			return this->frameMeta.frameId;
+		}
+
+		uint32_t GetFrameMetaFrameSizeBytes() const
+		{
+			return this->frameMeta.frameSizeBytes;
+		}
+
+		uint32_t GetFrameMetaLogicalFrameId() const
+		{
+			return this->frameMeta.logicalFrameId;
+		}
+
 		/* Struct for RTP header. */
 		struct Header
 		{
@@ -41,27 +127,31 @@ namespace RTC
 			uint32_t timestamp;
 			uint32_t ssrc;
 		};
-		//추가: logger에 사용되는 프레임 내 첫 rtp 패킷 정보
-		struct RtpPrefix
-		{	
-			uint32_t  Stamp;
-			uint32_t FrameID;
-			double sendTsMs;
-			double SFUrecvMs;
-			double SFUsendMs;
-			double p2s;
-			double s2c;
-		};
-		RtpPrefix rtpPrefix;
-		void SetReceivedAtMs(uint64_t ms) { this->receivedAtMs = ms; }
-  		uint64_t GetReceivedAtMs() const { return this->receivedAtMs; }
-		void SetReceivedAtUs(uint64_t us) { this->receivedAtUs = us; }
-  		uint64_t GetReceivedAtUs() const { return this->receivedAtUs; }
+		void SetReceivedAtMs(uint64_t ms)
+		{
+			this->receivedAtMs = ms;
+		}
+		uint64_t GetReceivedAtMs() const
+		{
+			return this->receivedAtMs;
+		}
+		void SetReceivedAtUs(uint64_t us)
+		{
+			this->receivedAtUs = us;
+		}
+		uint64_t GetReceivedAtUs() const
+		{
+			return this->receivedAtUs;
+		}
+
 	private:
+		FrameMeta frameMeta;
+		Vp8PictureIdTrace vp8PictureIdTrace;
+		
 	private:
 		/* Struct for RTP header extension. */
-		uint64_t receivedAtMs{0};
-		uint64_t receivedAtUs{0};
+		uint64_t receivedAtMs{ 0 };
+		uint64_t receivedAtUs{ 0 };
 		struct HeaderExtension
 		{
 			uint16_t id;

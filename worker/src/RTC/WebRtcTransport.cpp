@@ -8,6 +8,7 @@
 #include "Settings.hpp"
 #include "Utils.hpp"
 #include "FBS/webRtcTransport.h"
+#include "RTC/SimulcastConsumer.hpp"
 // TODO: For testing purposes. Must be removed.
 #ifdef MS_SCTP_STACK
 #include "RTC/SCTP/packet/Packet.hpp"
@@ -45,17 +46,29 @@
 // yeon: adative fec
 namespace
 {
+
+	// ============================================================
+	// yeon: FEC candidate action space
+	//
+	// protectionFactor / 255 ~= redundancy
+	// ============================================================
+	static constexpr uint8_t FecProtection0{ 0u };    // 0%
+	static constexpr uint8_t FecProtection10{ 26u };  // ~10%
+	static constexpr uint8_t FecProtection25{ 64u };  // ~25%
+	static constexpr uint8_t FecProtection40{ 102u }; // ~40%
+	static constexpr uint8_t FecProtection50{ 128u }; // ~50%
+
 	// ============================================================
 	// Adaptive FEC experiment switch.
 	//
 	// true  : Slack + TWCC loss 기반 adaptive FEC
 	// false : 기존 fixed FEC (25%)
 	// ============================================================
-	static constexpr bool AdaptiveFecEnabled{ false }; // adative fec를 사용할 것인지 말지는 여기서
+	static constexpr bool AdaptiveFecEnabled{ true }; // adative fec를 사용할 것인지 말지는 여기서
 	                                                  // 조절하면 된다.
 
-	// Fixed mode.
-	static constexpr uint8_t FixedFecProtectionFactor{ 64u }; // ~25%
+	// Fixed mode: adaptive가 아닌 경우 기본값.
+	static constexpr uint8_t FixedFecProtectionFactor{ FecProtection25 }; // 25%
 
 	// Adaptive FEC control.
 	static constexpr int64_t FecSlackBaselineWindowMs{ 10000 };
@@ -602,6 +615,287 @@ static std::optional<ParsedSctpAppMessage> ParseSctpData(const uint8_t* data, si
 	return std::nullopt;
 }
 
+// ============================================================
+// yeon: sender encoded-frame custom metadata prefix
+//
+// JS sender:
+//   const FRAME_META_MAGIC = 0x46534D31;
+//   dv.setUint32(0, FRAME_META_MAGIC, true);
+//   dv.setUint32(4, frameId, true);
+//   dv.setUint32(8, frameSizeBytes, true);
+//
+// Prefix layout:
+//   [0..3]   MAGIC
+//   [4..7]   FrameID
+//   [8..11]  FrameSizeBytes
+//
+// NOTE:
+//   JS DataView에서 little-endian(true)로 기록하므로
+//   SFU에서도 little-endian으로 읽어야 한다.
+// ============================================================
+
+static constexpr uint32_t FRAME_META_MAGIC{ 0x46534D31u };
+static constexpr size_t FRAME_META_HEADER_LEN{ 12u };
+
+struct ParsedFrameMeta
+{
+	uint32_t frameId{ 0u };
+	uint32_t frameSizeBytes{ 0u };
+
+	// RTP payload 안에서 VP8 Payload Descriptor의 길이.
+	// custom prefix는 payload + vp8DescriptorLength 위치에 존재한다.
+	size_t vp8DescriptorLength{ 0u };
+};
+
+static inline uint32_t ReadU32LE(const uint8_t* p)
+{
+	return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+	       (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+}
+
+/*
+ * VP8 RTP Payload Descriptor를 파싱한다.
+ *
+ * RTP payload:
+ *
+ *   [VP8 Payload Descriptor][VP8 encoded data ...]
+ *
+ * 우리가 sender Insertable Streams에서 붙인 prefix는 encoded data의
+ * 맨 앞에 들어가기 때문에 실제 RTP packet에서는:
+ *
+ *   [VP8 Payload Descriptor][Custom Prefix][Original VP8 data]
+ *
+ * 형태가 된다.
+ *
+ * isStartOfFrame:
+ *   S == 1 && PartID == 0
+ *
+ * 인 packet만 frame 시작 packet으로 취급한다.
+ */
+static bool ParseVp8PayloadDescriptor(
+  const uint8_t* payload, size_t payloadLen, size_t& descriptorLength, bool& isStartOfFrame)
+{
+	descriptorLength = 0u;
+	isStartOfFrame   = false;
+
+	if (!payload || payloadLen < 1u)
+	{
+		return false;
+	}
+
+	size_t pos = 0u;
+
+	// Mandatory VP8 Payload Descriptor byte.
+	const uint8_t b0 = payload[pos++];
+
+	const bool X      = (b0 & 0x80u) != 0u;
+	const bool S      = (b0 & 0x10u) != 0u;
+	const uint8_t pid = b0 & 0x0Fu;
+
+	// Start of partition 0 => frame 시작 packet.
+	isStartOfFrame = S && (pid == 0u);
+
+	/*
+	 * X == 0이면 descriptor는 여기서 끝.
+	 */
+	if (!X)
+	{
+		descriptorLength = pos;
+		return true;
+	}
+
+	/*
+	 * X == 1:
+	 *
+	 *   0 1 2 3 4 5 6 7
+	 *  +-+-+-+-+-+-+-+-+
+	 *  |I|L|T|K| RSV   |
+	 *  +-+-+-+-+-+-+-+-+
+	 */
+	if (pos >= payloadLen)
+	{
+		return false;
+	}
+
+	const uint8_t ext = payload[pos++];
+
+	const bool I = (ext & 0x80u) != 0u;
+	const bool L = (ext & 0x40u) != 0u;
+	const bool T = (ext & 0x20u) != 0u;
+	const bool K = (ext & 0x10u) != 0u;
+
+	/*
+	 * PictureID.
+	 *
+	 * I == 1이면 최소 1 byte.
+	 * PictureID 첫 byte의 M bit가 1이면 2 bytes.
+	 */
+	if (I)
+	{
+		if (pos >= payloadLen)
+		{
+			return false;
+		}
+
+		const uint8_t pictureId = payload[pos++];
+		const bool M            = (pictureId & 0x80u) != 0u;
+
+		if (M)
+		{
+			if (pos >= payloadLen)
+			{
+				return false;
+			}
+
+			// PictureID second byte.
+			pos++;
+		}
+	}
+
+	/*
+	 * TL0PICIDX.
+	 */
+	if (L)
+	{
+		if (pos >= payloadLen)
+		{
+			return false;
+		}
+
+		pos++;
+	}
+
+	/*
+	 * TID / Y / KEYIDX.
+	 *
+	 * T 또는 K 둘 중 하나라도 존재하면 1 byte 사용.
+	 */
+	if (T || K)
+	{
+		if (pos >= payloadLen)
+		{
+			return false;
+		}
+
+		pos++;
+	}
+
+	descriptorLength = pos;
+
+	return true;
+}
+
+/*
+ * VP8 frame의 첫 RTP packet에서 custom frame metadata를 찾는다.
+ */
+static bool ParseFrameMetaFromVp8Packet(RTC::RtpPacket* packet, ParsedFrameMeta& meta)
+{
+	if (!packet)
+	{
+		return false;
+	}
+
+	uint8_t* payload        = packet->GetPayload();
+	const size_t payloadLen = packet->GetPayloadLength();
+
+	if (!payload || payloadLen == 0u)
+	{
+		return false;
+	}
+
+	size_t descriptorLength{ 0u };
+	bool isStartOfFrame{ false };
+
+	if (!ParseVp8PayloadDescriptor(payload, payloadLen, descriptorLength, isStartOfFrame))
+	{
+		return false;
+	}
+
+	/*
+	 * custom prefix는 frame의 첫 encoded bytes에만 존재한다.
+	 *
+	 * 따라서 VP8 frame start packet이 아니면 검사하지 않는다.
+	 */
+	if (!isStartOfFrame)
+	{
+		return false;
+	}
+
+	/*
+	 * [VP8 descriptor][12-byte prefix]가 모두 들어 있어야 한다.
+	 */
+	if (payloadLen < descriptorLength + FRAME_META_HEADER_LEN)
+	{
+		return false;
+	}
+
+	const uint8_t* prefix = payload + descriptorLength;
+
+	const uint32_t magic = ReadU32LE(prefix);
+
+	if (magic != FRAME_META_MAGIC)
+	{
+		return false;
+	}
+
+	meta.frameId             = ReadU32LE(prefix + 4u);
+	meta.frameSizeBytes      = ReadU32LE(prefix + 8u);
+	meta.vp8DescriptorLength = descriptorLength;
+
+	return true;
+}
+
+/*
+ * Custom prefix를 RTP payload에서 제거한다.
+ *
+ * Before:
+ *
+ * [VP8 Descriptor][12B Prefix][Original VP8 Payload]
+ *
+ * After:
+ *
+ * [VP8 Descriptor][Original VP8 Payload]
+ */
+static bool RemoveFrameMetaFromVp8Packet(RTC::RtpPacket* packet, const ParsedFrameMeta& meta)
+{
+	if (!packet)
+	{
+		return false;
+	}
+
+	uint8_t* payload        = packet->GetPayload();
+	const size_t payloadLen = packet->GetPayloadLength();
+
+	if (!payload)
+	{
+		return false;
+	}
+
+	const size_t prefixOffset = meta.vp8DescriptorLength;
+
+	if (payloadLen < prefixOffset + FRAME_META_HEADER_LEN)
+	{
+		return false;
+	}
+
+	uint8_t* prefixStart = payload + prefixOffset;
+
+	const size_t bytesAfterPrefix = payloadLen - prefixOffset - FRAME_META_HEADER_LEN;
+
+	/*
+	 * descriptor는 그대로 두고,
+	 * prefix 뒤의 실제 VP8 data만 앞으로 12 bytes 당긴다.
+	 */
+	std::memmove(prefixStart, prefixStart + FRAME_META_HEADER_LEN, bytesAfterPrefix);
+
+	/*
+	 * RTP packet의 payload 길이도 12 bytes 감소.
+	 */
+	packet->SetPayloadLength(payloadLen - FRAME_META_HEADER_LEN);
+
+	return true;
+}
+
 static int GetVp8FrameType(const uint8_t* payload, size_t len)
 {
 	if (!payload || len < 1)
@@ -688,6 +982,12 @@ static int GetVp8FrameType(const uint8_t* payload, size_t len)
 namespace RTC
 {
 	/* Static. */
+
+	uint8_t RTC::WebRtcTransport::GetCurrentFecProtectionFactor() const
+	{
+		return AdaptiveFecEnabled ? this->adaptiveFecProtectionFactor : FixedFecProtectionFactor;
+	}
+
 	FrameRecordTable* WebRtcTransport::GetFrameRecordTableForConsumer(const std::string& consumerId)
 	{
 		auto& table = this->frameRecordTablesByConsumerId[consumerId];
@@ -808,6 +1108,38 @@ namespace RTC
 		}
 	}
 
+	RTC::PacerSnapshot RTC::WebRtcTransport::TokenBucketPacer::GetPredictionSnapshot(uint64_t nowMs) const
+	{
+		RTC::PacerSnapshot snapshot;
+
+		snapshot.sampledAtMs = nowMs;
+
+		snapshot.queuedBytes = static_cast<double>(this->queuedBytes);
+
+		snapshot.tokenRateBytesPerMs = this->tokenRateBytesPerMs;
+
+		snapshot.bucketCapacityBytes = this->bucketCapacityBytes;
+
+		// raw tokensBytes는 마지막 Refill() 시점의 값이므로
+		// decision 시점(nowMs)까지 생성되었을 token을 가상으로 반영.
+		// 실제 pacer state 자체는 변경하지 않는다.
+		double effectiveTokens = this->tokensBytes;
+
+		if (nowMs > this->lastRefillMs)
+		{
+			const double deltaMs = static_cast<double>(nowMs - this->lastRefillMs);
+
+			effectiveTokens += deltaMs * this->tokenRateBytesPerMs;
+		}
+
+		// 실제 Refill()과 동일하게 bucket capacity에서 cap.
+		effectiveTokens = std::min(effectiveTokens, this->bucketCapacityBytes);
+
+		snapshot.effectiveTokensBytes = effectiveTokens;
+
+		return snapshot;
+	}
+
 	void RTC::WebRtcTransport::TokenBucketPacer::UpdatePredictedQueueBytes()
 	{
 		double queueDelayMs       = std::max(0.0, standingRttMs - minRttMs);
@@ -849,7 +1181,7 @@ namespace RTC
 
 		if (queueCleared && this->hasHistoricalInfo && this->lastQueueBytesBeforeLoss > 0.0)
 		{
-			MS_ERROR_STD("빠른복구");
+			// MS_ERROR_STD("빠른복구");
 			const double recent = this->alpha * this->lastQueueBytesBeforeLoss;
 			B                   = std::min(this->historicalEmptyBucketBytes, recent);
 
@@ -874,7 +1206,7 @@ namespace RTC
 		// 2.1 감소: 로스 발생으로 절반 감소
 		if (this->lossDetected > 0)
 		{
-			MS_ERROR_STD("로스 감소");
+			// MS_ERROR_STD("로스 감소");
 			lastQueueBytesBeforeLoss = this->predictedQueueBytes; // 로스 발생 전 큐 사이즈를 저장함
 			B /= 2.0;
 
@@ -889,11 +1221,11 @@ namespace RTC
 		if (this->predictedQueueBytes > this->queueThresholdBytes) // queue 사이즈가 12000을 초과하면 그
 		                                                           // 초과량만큼 감소시킨다.
 		{
-			MS_ERROR_STD("감소");
+			// MS_ERROR_STD("감소");
 			B -=
 			  (this->predictedQueueBytes - this->queueThresholdBytes); // 네트워크 큐에 있는 바이트 수
-			                                                           // = 논문은 패킷 수 사용하여 적정값
-			                                                           // 10이므로, X 1200= 12000
+				                                                         // = 논문은 패킷 수 사용하여 적정값
+				                                                         // 10이므로, X 1200= 12000
 
 			B                         = std::max(this->minBucketBytes, B);
 			this->bucketCapacityBytes = B;
@@ -1088,7 +1420,7 @@ namespace RTC
 		this->q.pop_front();
 
 		// Actually send now (SRTP encrypt + tuple send happens here)
-		this->transport->SendRtpPacketNow(consumer, sharedPacket.GetPacket(), cb);
+		this->transport->SendRtpPacketNow(consumer, sharedPacket.GetPacket(), cb, true);
 
 		return true;
 	}
@@ -1278,7 +1610,7 @@ namespace RTC
 		this->rtpPacer->SetLinkCapacityBytesPerMs(availableBitrate / 8000);
 		this->rtpPacer->SetPacingRate(
 		  availableBitrate / 8); // 초당 바이트 단위로 바꿔준다. 여기서 1ms당 바이트 단위로 바꾼다.
-		                         // MS_ERROR_STD("pacing rate=%f", this->rtpPacer->GetPacingRate());
+			                       // MS_ERROR_STD("pacing rate=%f", this->rtpPacer->GetPacingRate());
 	}
 
 	void RTC::WebRtcTransport::OnPacketLossDetected(double loss)
@@ -1306,7 +1638,7 @@ namespace RTC
 		}
 
 		// lossDetected = loss; // setter 함수 필요 private
-		if (!this->rtpPacer || ispacing == false)
+		if (!this->rtpPacer)
 		{
 			return;
 		}
@@ -1323,11 +1655,146 @@ namespace RTC
 			this->networkState->UpdateRttMs(rttMs, nowMs);
 		}
 
-		if (!this->rtpPacer || ispacing == false)
+		if (!this->rtpPacer)
 		{
 			return;
 		}
 		this->rtpPacer->SetRttMs(rttMs); // setter}
+	}
+
+	bool RTC::WebRtcTransport::OnConsumerGetNetworkSnapshot(
+	  RTC::Consumer* /*consumer*/, RTC::NetworkSnapshot& snapshot)
+	{
+		if (!this->networkState)
+		{
+			return false;
+		}
+
+		snapshot = this->networkState->GetSnapshot();
+
+		// yeon: Camel congestion detector의 현재 raw signal
+		// congestion = S(D, inflight) ~= ΔDelay / ΔInflight
+		if (this->camelClient)
+		{
+			const auto& camelBitrates = this->camelClient->GetBitrates();
+
+			snapshot.camelCongestionGradientMsPerKb = camelBitrates.delayInflightGradientMsPerKb;
+		}
+		else
+		{
+			snapshot.camelCongestionGradientMsPerKb = 0.0;
+		}
+		return true;
+	}
+
+	bool RTC::WebRtcTransport::OnConsumerGetPacerSnapshot(
+	  RTC::Consumer* /*consumer*/, uint64_t nowMs, RTC::PacerSnapshot& snapshot)
+	{
+		if (!this->rtpPacer)
+		{
+			snapshot = RTC::PacerSnapshot{};
+
+			return false;
+		}
+
+		snapshot = this->rtpPacer->GetPredictionSnapshot(nowMs);
+
+		return true;
+	}
+
+	void RTC::WebRtcTransport::OnConsumerSetSlackActionDecision(
+	  RTC::Consumer* consumer, const RTC::SlackActionDecision& decision)
+	{
+		if (!consumer)
+		{
+			return;
+		}
+
+		this->pendingSlackActionDecisionByConsumer[consumer->id][decision.logicalFrameId] = decision;
+	}
+
+	bool RTC::WebRtcTransport::OnConsumerPredictSlack(
+	  RTC::Consumer* /*consumer*/,
+	  const RTC::SlackFeature& feature,
+	  const RTC::SlackActionIdentity& action,
+	  RTC::SlackPrediction& prediction)
+	{
+		if (!this->slackPredictor)
+		{
+			return false;
+		}
+
+		const auto result = this->slackPredictor->Predict(feature, action);
+
+		if (!result.has_value())
+		{
+			return false;
+		}
+
+		prediction = result.value();
+
+		return true;
+	}
+
+	bool RTC::WebRtcTransport::OnConsumerGetSlackRuntimeActionState(
+	  RTC::Consumer* consumer, RTC::SlackRuntimeActionState& state)
+	{
+		state = RTC::SlackRuntimeActionState{};
+
+		if (!consumer)
+		{
+			return false;
+		}
+
+		// ========================================================
+		// Pacing
+		//
+		// 실제 SendRtpPacket()의 조건과 동일하게 판단.
+		// ========================================================
+		state.pacingEnabled = this->rtpPacer && ispacing;
+
+		// ========================================================
+		// FlexFEC 지원 여부 확인.
+		// ========================================================
+		const auto& rtpParameters = consumer->GetRtpParameters();
+
+		bool flexFecEnabled{ false };
+
+		if (!rtpParameters.encodings.empty())
+		{
+			const auto& encoding = rtpParameters.encodings.front();
+
+			if (encoding.hasFlexFec && encoding.flexfec.ssrc != 0u)
+			{
+				for (const auto& codec : rtpParameters.codecs)
+				{
+					if (codec.mimeType.subtype == RTC::RtpCodecMimeType::Subtype::FLEXFEC)
+					{
+						flexFecEnabled = true;
+
+						break;
+					}
+				}
+			}
+		}
+
+		state.fecEnabled = flexFecEnabled;
+
+		state.fecProtectionFactor = flexFecEnabled ? GetCurrentFecProtectionFactor() : FecProtection0;
+
+		return true;
+	}
+
+	void RTC::WebRtcTransport::OnConsumerSetColdStartPacing(RTC::Consumer* /*consumer*/, bool enabled)
+	{
+		if (ispacing == enabled)
+		{
+			return;
+		}
+
+		MS_WARN_TAG(bwe, "[KNN-COLD-PACING] %s -> %s", ispacing ? "ON" : "OFF", enabled ? "ON" : "OFF");
+
+		ispacing = enabled;
 	}
 
 	void RTC::WebRtcTransport::OnSlack(const uint8_t* msg, size_t len)
@@ -1443,22 +1910,18 @@ namespace RTC
 		// 현재 frameId는 RTP timestamp를 사용 중.
 		const uint32_t frameId = static_cast<uint32_t>(rtpTimestamp64);
 
-		// slack = decodeStartMs - receiveTimeMs
-		const double slackMs = static_cast<double>(decodeStartMs - receiveTimeMs);
-		bool attached{ false };
-
 		// 브라우저 telemetry에는 consumerId가 없다.
 		// SendRtpPacketNow()에서 저장해둔 frameId -> consumerId mapping으로 찾는다.
 		auto consumerIdIt = this->frameConsumerIdByRtpTimestamp.find(frameId);
 
 		if (consumerIdIt == this->frameConsumerIdByRtpTimestamp.end())
 		{
-			MS_WARN_TAG(
-			  sctp,
-			  "[SLACK] no consumerId mapping for frameId:%" PRIu32 " slackMs:%.3f payload:%s",
-			  frameId,
-			  slackMs,
-			  text.c_str());
+			// MS_WARN_TAG(
+			//   sctp,
+			//   "[SLACK] no consumerId mapping for frameId:%" PRIu32 " payload:%s",
+			//   frameId,
+			//   text.c_str());
+
 			return;
 		}
 
@@ -1470,17 +1933,17 @@ namespace RTC
 		{
 			MS_WARN_TAG(
 			  sctp,
-			  "[SLACK] no frame record table for consumerId:%s frameId:%" PRIu32 " slackMs:%.3f payload:%s",
+			  "[SLACK] no frame record table for consumerId:%s frameId:%" PRIu32 " payload:%s",
 			  consumerId.c_str(),
 			  frameId,
-			  slackMs,
 			  text.c_str());
+
 			return;
 		}
 
 		auto* table = tableIt->second.get();
 
-		table->AttachTimingAndDesiredTimes(
+		const bool timingAttached = table->AttachTimingAndDesiredTimes(
 		  frameId,
 		  receiveTimeMs,
 		  latestDecodeTimeMs,
@@ -1496,68 +1959,250 @@ namespace RTC
 
 		table->AttachPacketReceiveTimes(frameId, packetReceiveTimes);
 
-		attached = table->AttachSlack(frameId, slackMs);
-
-		if (!attached)
+		if (!timingAttached)
 		{
 			MS_WARN_TAG(
 			  sctp,
-			  "[SLACK] no matching frame record for consumerId:%s frameId:%" PRIu32
-			  " slackMs:%.3f payload:%s",
+			  "[FRAME-TIMING] failed to attach telemetry "
+			  "consumerId:%s frameId:%" PRIu32,
 			  consumerId.c_str(),
-			  frameId,
-			  slackMs,
-			  text.c_str());
+			  frameId);
+
 			return;
 		}
 
-		if (this->slackPredictor)
+		// ============================================================
+		// Slack attach가 끝났으므로 completed FrameRecord 조회.
+		// Adaptive FEC / CSV 기록은 kNN과 독립적으로 처리한다.
+		// ============================================================
+		auto recordOpt = table->GetCompletedRecord(frameId);
+
+		if (recordOpt.has_value())
 		{
-			auto recordOpt = table->GetCompletedRecord(frameId);
+			const auto& rec = recordOpt.value();
 
-			if (recordOpt.has_value())
+			// --------------------------------------------------------
+			// 기존 Adaptive FEC용 Slack 처리.
+			// kNN과 관계 없으므로 그대로 유지.
+			// --------------------------------------------------------
+			// if (rec.hasDecodeSlackNominalMs)
+			// {
+			// 	this->AddFecSlackSample(
+			// 	  rec.decodeSlackNominalMs,
+			// 	  static_cast<int8_t>(rec.currentSpatialLayer),
+			// 	  DepLibUV::GetTimeMsInt64());
+			// }
+
+			// cold start 구현을 위해 위 코드를 대체하여 사용
+			if (rec.hasDecodeSlackNominalMs)
 			{
-				const auto& rec = recordOpt.value();
+				const int64_t decisionNowMs = DepLibUV::GetTimeMsInt64();
 
-				// yeon: adaptive fec
-				if (rec.hasDecodeSlackNominalMs)
-				{
-					this->AddFecSlackSample(
-					  rec.decodeSlackNominalMs,
-					  static_cast<int8_t>(rec.currentSpatialLayer),
-					  DepLibUV::GetTimeMsInt64());
-				}
+				// ========================================================
+				// 1. Cold-start Slack based layering.
+				// ========================================================
+				auto* consumer = this->FindConsumerById(consumerId);
 
+				// if (consumer)
+				// {
+				// 	const bool slackLayerCapChanged =
+				// 	  consumer->UpdateDecodeSlackLayerCap(rec.decodeSlackNominalMs, decisionNowMs);
+
+				// 	if (slackLayerCapChanged)
+				// 	{
+				// 		MS_WARN_TAG(bwe, "[COLD-START] decode slack layer cap changed");
+
+				// 		DistributeAvailableOutgoingBitrate();
+				// 		ComputeOutgoingDesiredBitrate();
+				// 	}
+				// }
+
+				// ========================================================
+				// 2. Cold-start adaptive FEC용 Slack sample.
+				// ========================================================
+				this->AddFecSlackSample(
+				  rec.decodeSlackNominalMs, static_cast<int8_t>(rec.currentSpatialLayer), decisionNowMs);
+
+				this->UpdateAdaptiveFecProtection(decisionNowMs);
+			}
+
+			// --------------------------------------------------------
+			// yeon: kNN historical sample 추가.
+			//
+			// 중요:
+			// 기존 rec.network는 사용하지 않는다.
+			// SimulcastConsumer의 action decision 시점에 저장된
+			// SlackActionDecision.feature를 그대로 사용한다.
+			//
+			// X_i =
+			// [
+			//   RTT,
+			//   Loss,
+			//   BW,
+			//   Congestion,
+			//   FrameSize(A),
+			//   PacingDelay(A)
+			// ]
+			//
+			// Y_i = decodeSlackLogical
+			//
+			// decodeSlackLogical =
+			//   decodeSlackNominal - rtpTimestampRewriteOffsetMs
+			//
+			// decodeSlackNominal =
+			//   desiredDecodeStartMs - receiveTimeMs
+			//
+			// rtpTimestampRewriteOffsetMs =
+			//   signed(frameId - logicalFrameId) * 1000 / 90000
+			
+			// 별도 outcome:
+			// deadlineMiss = LATE || DROP
+			// --------------------------------------------------------
+			if (this->slackPredictor)
+			{
 				RTC::SlackSample sample;
-				sample.frameId                    = rec.frameId;
-				sample.feature.rttMs              = rec.network.rttMs;
-				sample.feature.lossRate           = rec.network.lossRate;
-				sample.feature.aceQueueBytes      = rec.network.aceQueueBytes;
-				sample.feature.pacingBacklogBytes = rec.network.pacingBacklogBytes;
-				sample.feature.frameSizeBytes     = static_cast<double>(rec.frameSizeBytes);
-				sample.feature.packetCount        = static_cast<double>(rec.packetCount);
-				sample.feature.temporalLayer      = static_cast<double>(rec.temporalLayer);
-				sample.feature.isKeyFrame         = rec.isKeyFrame ? 1.0 : 0.0;
-				sample.slackMs                    = rec.slackMs;
 
-				this->slackPredictor->AddSample(sample);
+				bool shouldAdd{ true };
 
-				if (rec.hasReceiveTimeMs && rec.hasDesiredReceiveTimeMs && rec.hasReceiveSlackMs && this->frameRecordCsvWriter)
+				bool isColdStartSample{ false };
+				int16_t coldStartSpatialLayer{ -1 };
+
+				RTC::SimulcastConsumer* simulcastConsumer{ nullptr };
+
+				if (rec.hasSlackActionDecision)
 				{
-					this->frameRecordCsvWriter->WriteRecord(rec);
-				}
+					const auto& decision = rec.slackActionDecision;
 
-				if (this->framePacketCsvWriter && !packetReceiveTimes.empty())
-				{
-					this->framePacketCsvWriter->WritePacketReceiveTimes(
-					  rec.transportId, rec.consumerId, rec.producerId, frameId, packetReceiveTimes);
+					// ========================================================
+					// Cold Start pause + KNN evaluation pause 공통 처리.
+					//
+					// modelSelected 여부와 관계없이
+					// skipKnnTrainingSample이면 predictor에 절대 추가하지 않는다.
+					// ========================================================
+
+					if (decision.skipKnnTrainingSample)
+					{
+						shouldAdd = false;
+					}
+					else if (!decision.modelSelected)
+					{
+						// ====================================================
+						// Cold Start collection frame.
+						// ====================================================
+
+						isColdStartSample = true;
+
+						coldStartSpatialLayer = static_cast<int16_t>(decision.spatialLayer);
+
+						auto* consumer = this->FindConsumerById(consumerId);
+
+						if (consumer && consumer->GetType() == RTC::RtpParameters::Type::SIMULCAST)
+						{
+							simulcastConsumer = static_cast<RTC::SimulcastConsumer*>(consumer);
+
+							shouldAdd = simulcastConsumer->ShouldAcceptKnnColdStartTrainingSample(
+							  coldStartSpatialLayer, decision.fecProtectionFactor, decision.pacingEnabled);
+						}
+						else
+						{
+							shouldAdd = false;
+						}
+					}
+
+					// modelSelected == true && skip == false:
+					// 일반 KNN collection frame.
+					//
+					// shouldAdd는 true 그대로 유지되어
+					// 기존 online SlackPredictor update가 수행된다.
 				}
+				if (shouldAdd && table->TakeKnnTrainingSample(frameId, sample))
+				{
+					// Cold Start samples are permanently retained by SlackPredictor.
+					// KNN/evaluation samples enter the online FIFO aging pool.
+					sample.origin =
+					  isColdStartSample ? RTC::KnnSampleOrigin::COLD_START : RTC::KnnSampleOrigin::ONLINE;
+
+					const bool added = this->slackPredictor->AddSample(sample);
+
+					if (added)
+					{
+						if (isColdStartSample && simulcastConsumer)
+						{
+							// Count the action that actually became a historical sample.
+							simulcastConsumer->OnKnnColdStartTrainingSampleAdded(
+							  static_cast<int16_t>(sample.action.spatialLayer),
+							  sample.action.fecProtectionFactor,
+							  sample.action.pacingEnabled);
+						}
+					}
+				}
+			}
+
+			bool frameCsvWritten{ false };
+
+			if (rec.hasReceiveTimeMs && rec.hasDesiredReceiveTimeMs && rec.hasReceiveSlackMs && this->frameRecordCsvWriter)
+			{
+				this->frameRecordCsvWriter->WriteRecord(rec);
+
+				frameCsvWritten = true;
+			}
+
+			// ============================================================
+			// KNN evaluation 전체 종료.
+			//
+			// 중요:
+			// SimulcastConsumer에서 현재 option의 마지막 1500번째 evaluation frame을 결정한 순간
+			// process를 종료하면 마지막 FrameRecord/CSV가 유실될 수 있다.
+			//
+			// 따라서 그 frame이 browser feedback까지 돌아와
+			// frame_records.csv에 실제 기록된 뒤에만
+			// controller용 COMPLETE event를 출력한다.
+			// ============================================================
+
+			if (
+			  frameCsvWritten && rec.hasSlackActionDecision &&
+			  rec.slackActionDecision.knnEvaluationTerminalFrame &&
+			  !this->knnExperimentCompleteEventEmitted)
+			{
+				this->knnExperimentCompleteEventEmitted = true;
+
+				const size_t coldStartSamples =
+				  this->slackPredictor ? this->slackPredictor->GetColdStartSampleCount() : 0u;
+				const size_t onlineSamples =
+				  this->slackPredictor ? this->slackPredictor->GetOnlineSampleCount() : 0u;
+
+				MS_WARN_TAG(
+				  sctp,
+				  "[KNN-EXPERIMENT-COMPLETE] "
+				  "consumer:%s "
+				  "frameId:%" PRIu32
+				  " "
+				  "logicalFrameId:%" PRIu32
+				  " "
+				  "coldStartSamples:%zu "
+				  "onlineSamples:%zu "
+				  "totalSamples:%zu "
+				  "FINAL_CSV_WRITTEN",
+				  consumerId.c_str(),
+				  frameId,
+				  rec.slackActionDecision.logicalFrameId,
+				  coldStartSamples,
+				  onlineSamples,
+				  coldStartSamples + onlineSamples);
+			}
+
+			// 기존 packet receive time CSV 기록.
+			if (this->framePacketCsvWriter && !packetReceiveTimes.empty())
+			{
+				this->framePacketCsvWriter->WritePacketReceiveTimes(
+				  rec.transportId, rec.consumerId, rec.producerId, frameId, packetReceiveTimes);
 			}
 		}
 
 		// 더 이상 필요 없는 frameId -> consumerId mapping 제거.
-		// 이걸 안 하면 장시간 실험에서 map이 계속 커진다.
+		// 이걸 안 하면 장시간 실험에서 map이 계속 커짐
 		this->frameConsumerIdByRtpTimestamp.erase(frameId);
+
 	} // 지금 네트워크 지표는 Slack과 더불어, 그때의 네트워크 상황이 수집되고 있음
 	// 즉, 계산된 네트워크 Slack과 프레임 아이디인 Timestamp가 과거 데이터와 합체된다.
 	// 이제 이걸 사용해서 slack을 예측하는 코드를 개발하면 된다.
@@ -2442,42 +3087,6 @@ namespace RTC
 		std::array<uint32_t, 4> tidPkts{ 0, 0, 0, 0 }; // [0],[1],[2],[unknown]
 	};
 
-	// yeon : pacing 구현을 위한 새로운 SendRtpPacket 정의
-	void WebRtcTransport::PredictSlack(RTC::Consumer* consumer, RTC::RtpPacket* packet)
-	{
-		if (!consumer || !packet || !this->networkState)
-		{
-			return;
-		}
-
-		RTC::SlackFeature current;
-		auto snapshot = this->networkState->GetSnapshot();
-
-		current.rttMs              = snapshot.rttMs;
-		current.lossRate           = snapshot.lossRate;
-		current.aceQueueBytes      = snapshot.aceQueueBytes;
-		current.pacingBacklogBytes = snapshot.pacingBacklogBytes;
-
-		// 초기 버전: frame 전체 크기를 아직 모르므로 첫 packet size를 근사로 사용.
-		current.frameSizeBytes = static_cast<double>(packet->GetSize());
-
-		this->currentPredictedSlack.reset();
-
-		if (this->slackPredictor)
-		{
-			this->currentPredictedSlack = this->slackPredictor->PredictSlackMs(current);
-
-			if (this->currentPredictedSlack.has_value())
-			{
-				const std::string& consumerId = consumer->id;
-				const uint32_t frameId        = packet->GetTimestamp();
-
-				this->pendingPredictedSlackByConsumerFrame[consumerId][frameId] =
-				  this->currentPredictedSlack.value();
-			}
-		}
-	}
-
 	// 첫 비디오 패킷이 전송될 때 Consumer의 RTP parameters에서 다음 정보를 꺼냄:
 	/*
 	  media PT       : VP8 101
@@ -2607,8 +3216,7 @@ namespace RTC
 	  RTC::Consumer* consumer, FlexFecConsumerState& state, uint32_t timestamp)
 	{
 		if (!state.encoder || state.encoder->GetBufferedPacketCount() == 0u)
-		{	
-			
+		{
 			return;
 		}
 
@@ -2622,8 +3230,7 @@ namespace RTC
 		// constexpr uint8_t ProtectionFactor{ 128u };
 
 		// yeon: adaptive fec
-		const uint8_t protectionFactor =
-		  AdaptiveFecEnabled ? this->adaptiveFecProtectionFactor : FixedFecProtectionFactor;
+		const uint8_t protectionFactor = state.currentFrameProtectionFactor;
 
 		const size_t protectedPacketCount = state.encoder->GetBufferedPacketCount();
 
@@ -2667,7 +3274,12 @@ namespace RTC
 			}
 
 			SendFlexFecPacket(
-			  consumer, state, generatedPayload.data.data(), generatedPayload.data.size(), timestamp);
+			  consumer,
+			  state,
+			  generatedPayload.data.data(),
+			  generatedPayload.data.size(),
+			  timestamp,
+			  state.currentFramePacingEnabled);
 		}
 
 		MS_DEBUG_TAG(
@@ -2827,7 +3439,8 @@ namespace RTC
 	  FlexFecConsumerState& state,
 	  const uint8_t* payload,
 	  size_t payloadLength,
-	  uint32_t timestamp)
+	  uint32_t timestamp,
+	  bool pacingEnabled)
 	{
 		if (!consumer || !payload || payloadLength == 0u)
 		{
@@ -2944,18 +3557,21 @@ namespace RTC
 			  });
 		}
 
-		if (this->rtpPacer && ispacing)
+		if (this->rtpPacer && pacingEnabled)
 		{
 			this->rtpPacer->Enqueue(consumer, fecPacket.get(), sendCb);
 		}
 		else
 		{
-			SendRtpPacketNow(consumer, fecPacket.get(), sendCb);
+			SendRtpPacketNow(consumer, fecPacket.get(), sendCb, false);
 		}
 	}
 
 	WebRtcTransport::FlexFecConsumerState* WebRtcTransport::CollectMediaPacketForFlexFec(
-	  RTC::Consumer* consumer, RTC::RtpPacket* packet)
+	  RTC::Consumer* consumer,
+	  RTC::RtpPacket* packet,
+	  uint8_t frameProtectionFactor,
+	  bool framePacingEnabled)
 	{
 		auto* state = GetOrCreateFlexFecState(consumer);
 
@@ -2977,6 +3593,10 @@ namespace RTC
 		{
 			state->frameInitialized = true;
 			state->currentTimestamp = timestamp;
+
+			state->currentFrameProtectionFactor = frameProtectionFactor;
+
+			state->currentFramePacingEnabled = framePacingEnabled;
 		}
 		else if (state->currentTimestamp != timestamp)
 		{
@@ -2988,9 +3608,16 @@ namespace RTC
 			 * SendRtpPacket() 호출에서 전송 또는 enqueue되었으므로,
 			 * 여기서 이전 블록의 FEC를 생성해도 순서상 문제없다.
 			 */
+
+			// 이전 frame은 이전에 latch된 PF로 생성
 			GenerateAndSendFlexFecBlock(consumer, *state, state->currentTimestamp);
 
+			// 새로운 frame 시작
 			state->currentTimestamp = timestamp;
+
+			state->currentFrameProtectionFactor = frameProtectionFactor;
+
+			state->currentFramePacingEnabled = framePacingEnabled;
 		}
 
 		/*
@@ -3111,7 +3738,8 @@ namespace RTC
 	{
 		MS_TRACE();
 
-		if (!consumer || !packet)
+		// Packet 자체가 없으면 전송 불가.
+		if (!packet)
 		{
 			if (cb)
 			{
@@ -3121,6 +3749,122 @@ namespace RTC
 
 			return;
 		}
+		// ============================================================
+		// GCC probation / probe packet.
+		// TransportCongestionControlClient의 probe packet은
+		// consumer == nullptr 상태로 이 함수에 들어온다.
+		// 이 packet은 일반 media/FEC/kNN/custom pacing 경로를 타면 안 되고 바로 기존 RTP send path로
+		// 보내야 함
+		// ============================================================
+		if (!consumer)
+		{
+			SendRtpPacketNow(nullptr, packet, cb, false);
+			return;
+		}
+
+		// yeon: layer 별 frame size
+		if (consumer->GetKind() == RTC::Media::Kind::VIDEO && packet->HasFrameMeta())
+		{
+			const uint32_t logicalFrameId  = packet->GetFrameMetaLogicalFrameId();
+			const uint32_t outgoingFrameId = packet->GetTimestamp();
+
+			auto* table = this->GetFrameRecordTableForConsumer(consumer->id);
+
+			const auto& vp8Trace = packet->GetVp8PictureIdTrace();
+			if (vp8Trace.valid)
+			{
+				table->AttachVp8PictureIdTrace(
+				  outgoingFrameId,
+				  vp8Trace.hasIncomingPictureId,
+				  vp8Trace.incomingPictureId,
+				  vp8Trace.hasOutgoingPictureId,
+				  vp8Trace.outgoingPictureId,
+				  vp8Trace.hasTl0PictureIndex,
+				  vp8Trace.pictureIdSyncApplied,
+				  vp8Trace.pictureIdRewriteApplied);
+			}
+
+			if (table)
+			{
+				RTC::LogicalFrameSizeSnapshot snapshot;
+
+				// frame-size snapshot은 없을 수도 있지만,
+				// logicalFrameId 자체는 항상 FrameMeta에서 알고 있다.
+				RTC::LogicalFrameSizeRegistry::Instance().Get(consumer->producerId, logicalFrameId, snapshot);
+
+				table->AttachIngressFrameSizes(outgoingFrameId, logicalFrameId, snapshot);
+
+				auto consumerIt = this->pendingSlackActionDecisionByConsumer.find(consumer->id);
+
+				if (consumerIt != this->pendingSlackActionDecisionByConsumer.end())
+				{
+					auto& byLogical = consumerIt->second;
+
+					auto decisionIt = byLogical.find(logicalFrameId);
+
+					if (decisionIt != byLogical.end())
+					{
+						const auto decision = decisionIt->second;
+
+						// historical record용.
+						table->AttachSlackActionDecision(outgoingFrameId, decision);
+
+						// ========================================================
+						// 해당 outgoing frame의 실제 실행 action.
+						// 이후 같은 RTP timestamp의 모든 packet이 이 값을 사용.
+						// ========================================================
+						this->activeSlackActionByConsumerFrame[consumer->id][outgoingFrameId] = decision;
+
+						byLogical.erase(decisionIt);
+
+						if (byLogical.empty())
+						{
+							this->pendingSlackActionDecisionByConsumer.erase(consumerIt);
+						}
+					}
+				}
+			}
+		}
+
+		// ============================================================
+		// 현재 outgoing frame에 적용할 action 조회.
+		// ============================================================
+
+		RTC::SlackActionDecision frameAction;
+		bool hasFrameAction{ false };
+
+		const uint32_t frameTimestamp = packet->GetTimestamp();
+
+		const bool isLastPacketOfFrame = packet->HasMarker();
+
+		auto consumerActionIt = this->activeSlackActionByConsumerFrame.find(consumer->id);
+
+		if (consumerActionIt != this->activeSlackActionByConsumerFrame.end())
+		{
+			auto frameActionIt = consumerActionIt->second.find(frameTimestamp);
+
+			if (frameActionIt != consumerActionIt->second.end())
+			{
+				frameAction = frameActionIt->second;
+
+				hasFrameAction = true;
+			}
+		}
+
+		// ============================================================
+		// Per-frame action override.
+		//
+		// KNN:                  modelSelected=true
+		// Balanced Cold Start: forceRuntimeAction=true
+		// Legacy Cold Start:   both false -> existing runtime FEC/Pacing
+		// ============================================================
+		const bool useFrameAction =
+		  hasFrameAction && (frameAction.modelSelected || frameAction.forceRuntimeAction);
+
+		const uint8_t frameFecProtectionFactor =
+		  useFrameAction ? frameAction.fecProtectionFactor : GetCurrentFecProtectionFactor();
+
+		const bool framePacingEnabled = useFrameAction ? frameAction.pacingEnabled : ispacing;
 
 		/*
 		 * 현재 미디어 RTP를 FEC encoder 내부에 복사
@@ -3128,7 +3872,8 @@ namespace RTC
 		 * marker 패킷이면 flexFecStateToGenerate가 non-null이지만,
 		 * 아직 EncodeFec()는 수행하지 않는다.
 		 */
-		auto* flexFecStateToGenerate = CollectMediaPacketForFlexFec(consumer, packet);
+		auto* flexFecStateToGenerate =
+		  CollectMediaPacketForFlexFec(consumer, packet, frameFecProtectionFactor, framePacingEnabled);
 
 		/*
 		 * SendRtpPacketNow() 이후 packet 내용에 의존하지 않도록
@@ -3142,45 +3887,16 @@ namespace RTC
 			this->rtpPacer->ObservePacketForFrame(packet);
 		}
 
-		const std::string& consumerId = consumer->id;
-		const uint32_t ts             = packet->GetTimestamp();
-
-		// ===== consumer별 새 프레임 첫 패킷인지 확인 =====
-		bool& predictFrameInit = this->predictFrameInitByConsumerId[consumerId];
-
-		uint32_t& currentPredictFrameTimestamp =
-		  this->currentPredictFrameTimestampByConsumerId[consumerId];
-
-		bool isNewFrame = false;
-
-		if (!predictFrameInit)
-		{
-			predictFrameInit             = true;
-			currentPredictFrameTimestamp = ts;
-			isNewFrame                   = true;
-		}
-		else if (currentPredictFrameTimestamp != ts)
-		{
-			currentPredictFrameTimestamp = ts;
-			isNewFrame                   = true;
-		}
-
-		// ===== 새 프레임일 때만 이 패킷을 보내기 전에 slack 예측 =====
-		if (isNewFrame)
-		{
-			PredictSlack(consumer, packet);
-		}
-
 		/*
 		 * 원본 미디어 RTP를 FEC보다 먼저 전송 경로에 넣는다.
 		 */
-		if (this->rtpPacer && ispacing)
+		if (this->rtpPacer && framePacingEnabled)
 		{
 			this->rtpPacer->Enqueue(consumer, packet, cb);
 		}
 		else
 		{
-			SendRtpPacketNow(consumer, packet, cb);
+			SendRtpPacketNow(consumer, packet, cb, false);
 		}
 
 		/*
@@ -3197,6 +3913,24 @@ namespace RTC
 
 			GenerateAndSendFlexFecBlock(consumer, *flexFecStateToGenerate, flexFecTimestamp);
 		}
+
+		// ============================================================
+		// 이 outgoing frame에 대한 실행 action 사용 완료.
+		// ============================================================
+		if (isLastPacketOfFrame)
+		{
+			auto consumerActionIt = this->activeSlackActionByConsumerFrame.find(consumer->id);
+
+			if (consumerActionIt != this->activeSlackActionByConsumerFrame.end())
+			{
+				consumerActionIt->second.erase(frameTimestamp);
+
+				if (consumerActionIt->second.empty())
+				{
+					this->activeSlackActionByConsumerFrame.erase(consumerActionIt);
+				}
+			}
+		}
 	}
 
 	static inline uint64_t NowUs()
@@ -3207,9 +3941,13 @@ namespace RTC
 	}
 
 	void RTC::WebRtcTransport::SendRtpPacketNow(
-	  RTC::Consumer* consumer, RTC::RtpPacket* packet, const RTC::Transport::onSendCallback* cb)
+	  RTC::Consumer* consumer,
+	  RTC::RtpPacket* packet,
+	  const RTC::Transport::onSendCallback* cb,
+	  bool pacingApplied)
 	{
 		MS_TRACE();
+		// MS_ERROR_STD();
 		int a;
 		// MS_ERROR_STD();
 		if (this->tccClient)
@@ -3245,6 +3983,10 @@ namespace RTC
 			return;
 		}
 
+		// yeon: custom prefix 위치 확인용
+		const uint8_t* payload  = packet->GetPayload();
+		const size_t payloadLen = packet->GetPayloadLength();
+
 		const uint8_t* data = packet->GetData();
 		auto len            = packet->GetSize();
 
@@ -3264,11 +4006,14 @@ namespace RTC
 		// fec problem: 자꾸 rtx같은 패킷으로 인해 기존 프레임 레코드가 초기값으로 덮어씌워짐 그걸 방지
 		bool isOriginalMediaPacket = true;
 
-		auto fecStateIt = this->flexFecStatesByConsumerId.find(consumer->id);
-
-		if (fecStateIt != this->flexFecStatesByConsumerId.end())
+		if (consumer)
 		{
-			isOriginalMediaPacket = (packet->GetSsrc() == fecStateIt->second.mediaSsrc);
+			auto fecStateIt = this->flexFecStatesByConsumerId.find(consumer->id);
+
+			if (fecStateIt != this->flexFecStatesByConsumerId.end())
+			{
+				isOriginalMediaPacket = (packet->GetSsrc() == fecStateIt->second.mediaSsrc);
+			}
 		}
 
 		// ---- frame record store begin ----
@@ -3312,13 +4057,22 @@ namespace RTC
 
 			auto snapshot = this->networkState->GetSnapshot();
 
-			if (this->rtpPacer)
+			if (this->camelClient)
 			{
-				snapshot.pacingBacklogBytes    = static_cast<double>(this->rtpPacer->queuedBytes);
-				snapshot.pacingBucketSizeBytes = this->rtpPacer->GetBucketSize();
+				const auto& camelBitrates = this->camelClient->GetBitrates();
+
+				snapshot.camelCongestionGradientMsPerKb = camelBitrates.delayInflightGradientMsPerKb;
 			}
 
-			const bool pacingEnabled = ispacing;
+			if (this->rtpPacer)
+			{
+				const auto pacerSnapshot           = this->rtpPacer->GetPredictionSnapshot(nowMs);
+				snapshot.pacingBacklogBytes        = static_cast<double>(this->rtpPacer->queuedBytes);
+				snapshot.pacingBucketSizeBytes     = this->rtpPacer->GetBucketSize();
+				snapshot.pacingTokenRateBytesPerMs = this->rtpPacer->GetPacingRate() / 1000.0;
+			}
+
+			const bool pacingEnabled = pacingApplied;
 
 			table->OnPacketSent(
 			  transportId,
@@ -3336,18 +4090,6 @@ namespace RTC
 			  pacingEnabled,
 			  nowMs,
 			  snapshot);
-
-			if (isLastPacketOfFrame)
-			{
-				auto& pending = this->pendingPredictedSlackByConsumerFrame[consumerId];
-				auto it       = pending.find(frameId);
-
-				if (it != pending.end())
-				{
-					table->AttachPredictedSlack(frameId, it->second);
-					pending.erase(it);
-				}
-			}
 		}
 		// ---- frame record store end ----
 
@@ -3570,7 +4312,7 @@ namespace RTC
 	  RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
-		// MS_ERROR_STD("debug");
+		MS_ERROR_STD("debug");
 		//  Ensure DTLS is connected.
 		if (this->dtlsTransport->GetState() != RTC::DtlsTransport::DtlsState::CONNECTED)
 		{
@@ -3627,6 +4369,48 @@ namespace RTC
 
 			return;
 		}
+
+		// // ============================================================
+		// // yeon: VP8 first packet에서 sender frame metadata prefix parsing: Frame Size 파싱
+		// // ============================================================
+
+		// // SFU RTP 패킷 페이로드 확인 및 prefix를 찾는 코드
+		// // 패킷이 복호화되고 나서부터 데이터를 읽을 수 있으므로 그 이후 진행
+		// ParsedFrameMeta frameMeta;
+
+		// if (ParseFrameMetaFromVp8Packet(packet, frameMeta))
+		// {
+		// 	/*
+		// 	 * frameMeta.frameId
+		// 	 * frameMeta.frameSizeBytes를 얻은 상태.
+		// 	 */
+
+		// 	MS_ERROR_STD(
+		// 	  "[FRAME-META] ssrc:%" PRIu32 ", rtpTimestamp:%" PRIu32 ", frameId:%" PRIu32
+		// 	  ", frameSize:%" PRIu32 " bytes",
+		// 	  packet->GetSsrc(),
+		// 	  packet->GetTimestamp(),
+		// 	  frameMeta.frameId,
+		// 	  frameMeta.frameSizeBytes);
+
+		// 	/*
+		// 	 * 이 prefix는 SFU 내부 metadata 전달용일 뿐,
+		// 	 * viewer decoder로 그대로 보내면 안 된다.
+		// 	 * 따라서 여기서 제거하고 정상 VP8 payload로 복원.
+		// 	 */
+		// 	if (!RemoveFrameMetaFromVp8Packet(packet, frameMeta))
+		// 	{
+		// 		MS_WARN_TAG(
+		// 		  rtp,
+		// 		  "failed to remove frame metadata prefix "
+		// 		  "[ssrc:%" PRIu32 ", timestamp:%" PRIu32 "]",
+		// 		  packet->GetSsrc(),
+		// 		  packet->GetTimestamp());
+
+		// 		delete packet;
+		// 		return;
+		// 	}
+		// }
 
 		// Trick for clients performing aggressive ICE regardless we are ICE-Lite.
 		this->iceServer->MayForceSelectedTuple(tuple);
@@ -4345,69 +5129,66 @@ namespace RTC
 			return;
 		}
 
-		uint8_t newProtectionFactor{ 64u };
+		uint8_t newProtectionFactor{ FecProtection25 };
 
 		// -------------------------------------------------
 		// Slack NORMAL
+		//
 		// loss low    -> 0%
-		// loss medium -> 12.5%
+		// loss medium -> 10%
 		// loss high   -> 25%
 		// -------------------------------------------------
 		if (slackState == FecSlackState::NORMAL)
 		{
 			if (lossRate >= FecHighLossThreshold)
 			{
-				newProtectionFactor = 64u;
+				newProtectionFactor = FecProtection25;
 			}
 			else if (lossRate >= FecMediumLossThreshold)
 			{
-				newProtectionFactor = 32u;
+				newProtectionFactor = FecProtection10;
 			}
 			else
 			{
-				newProtectionFactor = 0u;
+				newProtectionFactor = FecProtection0;
 			}
 		}
-		// -------------------------------------------------
-		// Slack BAD
-		// low    -> 12.5%
-		// medium -> 25%
-		// high   -> 37.5%
-		// -------------------------------------------------
+
+		// loss low    -> 10%
+		// loss medium -> 25%
+		// loss high   -> 40%
 		else if (slackState == FecSlackState::BAD)
 		{
 			if (lossRate >= FecHighLossThreshold)
 			{
-				newProtectionFactor = 96u;
+				newProtectionFactor = FecProtection40;
 			}
 			else if (lossRate >= FecMediumLossThreshold)
 			{
-				newProtectionFactor = 64u;
+				newProtectionFactor = FecProtection25;
 			}
 			else
 			{
-				newProtectionFactor = 32u;
+				newProtectionFactor = FecProtection10;
 			}
 		}
-		// -------------------------------------------------
-		// Slack SEVERE
-		// low    -> 25%
-		// medium -> 37.5%
-		// high   -> 50%
-		// -------------------------------------------------
+
+		// loss low    -> 25%
+		// loss medium -> 40%
+		// loss high   -> 50%
 		else
 		{
 			if (lossRate >= FecHighLossThreshold)
 			{
-				newProtectionFactor = 128u;
+				newProtectionFactor = FecProtection50;
 			}
 			else if (lossRate >= FecMediumLossThreshold)
 			{
-				newProtectionFactor = 96u;
+				newProtectionFactor = FecProtection40;
 			}
 			else
 			{
-				newProtectionFactor = 64u;
+				newProtectionFactor = FecProtection25;
 			}
 		}
 
@@ -4424,19 +5205,6 @@ namespace RTC
 		const double oldRedundancyPercent = static_cast<double>(oldProtectionFactor) * 100.0 / 255.0;
 
 		const double newRedundancyPercent = static_cast<double>(newProtectionFactor) * 100.0 / 255.0;
-
-		// MS_WARN_TAG(
-		//   bwe,
-		//   "[ADAPTIVE-FEC] redundancy changed "
-		//   "[old:%.1f%%, new:%.1f%%, loss:%.2f%%, baselineP80:%.2f, "
-		//   "badRatio:%.1f%%, severeRatio:%.1f%%, slackState:%d]",
-		//   oldRedundancyPercent,
-		//   newRedundancyPercent,
-		//   lossRate * 100.0,
-		//   baselineSlackMs,
-		//   badFrameRatio * 100.0,
-		//   severeFrameRatio * 100.0,
-		//   static_cast<int>(slackState));
 	}
 
 } // namespace RTC

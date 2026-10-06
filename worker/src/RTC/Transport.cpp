@@ -1751,6 +1751,18 @@ namespace RTC
 		return it->second;
 	}
 
+	RTC::Consumer* Transport::FindConsumerById(const std::string& consumerId) const
+	{
+		auto it = this->mapConsumers.find(consumerId);
+
+		if (it == this->mapConsumers.end())
+		{
+			return nullptr;
+		}
+
+		return it->second;
+	}
+
 	inline RTC::Consumer* Transport::GetConsumerByMediaSsrc(uint32_t ssrc) const
 	{
 		MS_TRACE();
@@ -3246,6 +3258,50 @@ namespace RTC
 		}
 	}
 
+	// yeon: network state를 SimulcastConsumer에서 가져오기
+	bool Transport::OnConsumerGetNetworkSnapshot(
+	  RTC::Consumer* /*consumer*/, RTC::NetworkSnapshot& /*snapshot*/)
+	{
+		// 일반 Transport에는 NetworkState가 없다.
+		return false;
+	}
+
+	// yeon: pacer state를 SimulcastConsumer에서 가져오기
+	bool RTC::Transport::OnConsumerGetPacerSnapshot(
+	  RTC::Consumer* /*consumer*/, uint64_t /*nowMs*/, RTC::PacerSnapshot& snapshot)
+	{
+		snapshot = RTC::PacerSnapshot{};
+
+		return false;
+	}
+
+	void RTC::Transport::OnConsumerSetSlackActionDecision(
+	  RTC::Consumer* /*consumer*/, const RTC::SlackActionDecision& /*decision*/)
+	{
+		// generic Transport에서는 아무것도 하지 않음.
+	}
+
+	bool RTC::Transport::OnConsumerPredictSlack(
+	  RTC::Consumer* /*consumer*/, const RTC::SlackFeature& /*feature*/, const RTC::SlackActionIdentity& /*action*/, RTC::SlackPrediction& prediction)
+	{
+		prediction = RTC::SlackPrediction{};
+
+		return false;
+	}
+
+
+	bool RTC::Transport::OnConsumerGetSlackRuntimeActionState(
+	  RTC::Consumer* /*consumer*/, RTC::SlackRuntimeActionState& state)
+	{
+		state = RTC::SlackRuntimeActionState{};
+
+		return false;
+	}
+	void RTC::Transport::OnConsumerSetColdStartPacing(RTC::Consumer* /*consumer*/, bool /*enabled*/)
+	{
+		// generic Transport에는 pacing controller가 없으므로 아무것도 하지 않음.
+	}
+
 	inline void Transport::OnDataProducerMessageReceived(
 	  RTC::DataProducer* dataProducer,
 	  const uint8_t* msg,
@@ -3489,8 +3545,7 @@ namespace RTC
 		}
 	}
 
-	void Transport::ApplySelectedOutgoingBitrate(
-	  RTC::TransportCongestionControlClient::Bitrates& bitrates)
+	void Transport::ApplySelectedOutgoingBitrate(RTC::TransportCongestionControlClient::Bitrates& bitrates)
 	{
 		DistributeAvailableOutgoingBitrate();
 		ComputeOutgoingDesiredBitrate();
@@ -3501,8 +3556,7 @@ namespace RTC
 		OnAvailableBitrateChanged(GetSelectedAvailableOutgoingBitrate());
 	}
 
-	void Transport::ApplySelectedOutgoingBitrate(
-	  RTC::CamelCongestionControlClient::Bitrates& /*bitrates*/)
+	void Transport::ApplySelectedOutgoingBitrate(RTC::CamelCongestionControlClient::Bitrates& /*bitrates*/)
 	{
 		DistributeAvailableOutgoingBitrate();
 		ComputeOutgoingDesiredBitrate();

@@ -209,6 +209,35 @@ namespace RTC
 		struct TraceEventTypes traceEventTypes;
 		// Static buffer.
 		thread_local static uint8_t* buffer;
+
+		// yeon: simulcast logical-frame timestamp calibration.
+		//
+		// encodingIdx=0의 RTP timestamp 축을 canonical logical-frame 축으로 사용한다.
+		static constexpr size_t FrameMetaReferenceEncodingIdx{ 0u };
+
+		// encodingIdx -> canonical timestamp에 더할 고정 offset.
+		// reference encoding(0)은 항상 offset=0으로 취급한다.
+		std::unordered_map<size_t, uint32_t> frameMetaTimestampOffsetByEncoding;
+
+		// 마지막으로 관측한 reference(L0) frame.
+		// 다른 encoding이 reference보다 나중에 들어온 경우 calibration에 사용.
+		bool hasFrameMetaReferenceSample{ false };
+		uint32_t lastFrameMetaReferenceRtpTimestamp{ 0u };
+		uint64_t lastFrameMetaReferenceArrivalMs{ 0u };
+
+		// 다른 encoding이 reference보다 먼저 들어온 경우 잠깐 기억한다.
+		struct PendingFrameMetaCalibration
+		{
+			bool valid{ false };
+
+			uint32_t rtpTimestamp{ 0u };
+			uint32_t metaFrameId{ 0u };
+			uint32_t frameSizeBytes{ 0u };
+
+			uint64_t arrivalMs{ 0u };
+		};
+
+		std::unordered_map<size_t, PendingFrameMetaCalibration> pendingFrameMetaCalibrationByEncoding;
 	};
 } // namespace RTC
 

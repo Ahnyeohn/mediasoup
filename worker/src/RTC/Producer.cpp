@@ -16,8 +16,186 @@
 #include <absl/container/inlined_vector.h>
 #include <cstring> // std::memcpy()
 
+#include "RTC/FrameRecord.hpp"
+
 namespace RTC
 {
+
+	// yeon: frame size metadata
+	static constexpr uint8_t FRAME_META_MAGIC_LE[4]{ 0x31, 0x4D, 0x53, 0x46 };
+
+	static constexpr size_t FRAME_META_HEADER_LEN{ 12u };
+
+	static inline uint32_t ReadU32LE(const uint8_t* p)
+	{
+		return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+		       (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+	}
+
+	static bool ParseVp8PayloadDescriptorLength(
+	  const uint8_t* payload, size_t payloadLen, size_t& descriptorLen, bool& isFrameStart)
+	{
+		descriptorLen = 0;
+		isFrameStart  = false;
+
+		if (!payload || payloadLen < 1)
+		{
+			return false;
+		}
+
+		size_t offset = 0;
+
+		// VP8 Payload Descriptor:
+		// X R N S R PID
+		const uint8_t b0 = payload[offset++];
+
+		const bool X      = (b0 & 0x80) != 0;
+		const bool S      = (b0 & 0x10) != 0;
+		const uint8_t PID = b0 & 0x07;
+
+		isFrameStart = S && PID == 0;
+
+		if (!X)
+		{
+			descriptorLen = offset;
+			return true;
+		}
+
+		// Extended control bits.
+		if (payloadLen < offset + 1)
+		{
+			return false;
+		}
+
+		const uint8_t ext = payload[offset++];
+
+		const bool I = (ext & 0x80) != 0;
+		const bool L = (ext & 0x40) != 0;
+		const bool T = (ext & 0x20) != 0;
+		const bool K = (ext & 0x10) != 0;
+
+		// PictureID.
+		if (I)
+		{
+			if (payloadLen < offset + 1)
+			{
+				return false;
+			}
+
+			const uint8_t pictureId = payload[offset++];
+			const bool M            = (pictureId & 0x80) != 0;
+
+			// Two-byte PictureID.
+			if (M)
+			{
+				if (payloadLen < offset + 1)
+				{
+					return false;
+				}
+
+				offset++;
+			}
+		}
+
+		// TL0PICIDX.
+		if (L)
+		{
+			if (payloadLen < offset + 1)
+			{
+				return false;
+			}
+
+			offset++;
+		}
+
+		// TID/Y/KEYIDX.
+		if (T || K)
+		{
+			if (payloadLen < offset + 1)
+			{
+				return false;
+			}
+
+			offset++;
+		}
+
+		descriptorLen = offset;
+
+		return true;
+	}
+
+	static bool ParseAndStripFrameMeta(RTC::RtpPacket* packet, uint32_t& frameId, uint32_t& frameSizeBytes)
+	{
+		if (!packet)
+		{
+			return false;
+		}
+
+		uint8_t* payload = packet->GetPayload();
+		const size_t len = packet->GetPayloadLength();
+
+		if (!payload || len == 0)
+		{
+			return false;
+		}
+
+		size_t descriptorLen{ 0 };
+		bool isFrameStart{ false };
+
+		if (!ParseVp8PayloadDescriptorLength(payload, len, descriptorLen, isFrameStart))
+		{
+			return false;
+		}
+
+		// Metadata는 encoded frame의 맨 앞에 prepend했으므로
+		// VP8 frame의 첫 RTP packet에만 존재함.
+		if (!isFrameStart)
+		{
+			return false;
+		}
+
+		if (len < descriptorLen + FRAME_META_HEADER_LEN)
+		{
+			return false;
+		}
+
+		uint8_t* meta = payload + descriptorLen;
+
+		if (std::memcmp(meta, FRAME_META_MAGIC_LE, sizeof(FRAME_META_MAGIC_LE)) != 0)
+		{
+			return false;
+		}
+
+		// [0..3]  MAGIC
+		// [4..7]  FrameID
+		// [8..11] Encoded Frame Size
+		frameId        = ReadU32LE(meta + 4);
+		frameSizeBytes = ReadU32LE(meta + 8);
+
+		// MS_ERROR_STD(
+		//   "[FRAME-META] parsed "
+		//   "frameId=%" PRIu32 " frameSize=%" PRIu32
+		//   " descriptorLen=%zu"
+		//   " payloadLenBefore=%zu",
+		//   frameId,
+		//   frameSizeBytes,
+		//   descriptorLen,
+		//   len);
+
+		// [descriptor][META][VP8]
+		//             ↓ 12 bytes 제거
+		// [descriptor][VP8]
+		packet->ShiftPayload(descriptorLen, FRAME_META_HEADER_LEN, false /*expand*/);
+
+		// MS_ERROR_STD(
+		//   "[FRAME-META] stripped "
+		//   "frameId=%" PRIu32 " payloadLenAfter=%zu",
+		//   frameId,
+		//   packet->GetPayloadLength());
+
+		return true;
+	}
+
 	/* Static variables. */
 
 	thread_local uint8_t* Producer::buffer{ nullptr };
@@ -573,7 +751,7 @@ namespace RTC
 	Producer::ReceiveRtpPacketResult Producer::ReceiveRtpPacket(RTC::RtpPacket* packet)
 	{
 		MS_TRACE();
-		//MS_ERROR_STD("debug");
+
 #ifdef MS_RTC_LOGGER_RTP
 		packet->logger.producerId = this->id;
 #endif
@@ -644,6 +822,274 @@ namespace RTC
 		else
 		{
 			MS_ABORT("found stream does not match received packet");
+		}
+
+		/*
+		 * yeon:
+		 * Edge에서 sender frame metadata를 읽고 제거한다.
+		 *
+		 * 여기까지 오면 VP8::ProcessRtpPacket()을 통해
+		 * VP8 payload descriptor / keyframe 정보는 이미 packet에 반영된 상태다.
+		 *
+		 * ParseAndStripFrameMeta()는:
+		 *   [VP8 descriptor][custom metadata][VP8 bitstream]
+		 *                    ↓ remove
+		 *   [VP8 descriptor][VP8 bitstream]
+		 *
+		 * 로 복원한다.
+		 *
+		 * MEDIA 패킷인 경우에만:
+		 *  - simulcast encodingIdx 확인
+		 *  - logicalFrameId 생성
+		 *  - 세 layer frame-size registry에 저장
+		 *  - RtpPacket sidecar에 metadata 저장
+		 *
+		 * RTX의 경우:
+		 *  - metadata prefix 제거만 수행
+		 *  - registry / sidecar 갱신은 하지 않는다.
+		 */
+		if (this->kind == RTC::Media::Kind::VIDEO)
+		{
+			uint32_t metaFrameId{ 0u };
+			uint32_t metaFrameSizeBytes{ 0u };
+
+			if (ParseAndStripFrameMeta(packet, metaFrameId, metaFrameSizeBytes))
+			{
+				// RTX는 prefix만 제거하고 새로운 frame observation으로 사용하지 않는다.
+				if (!isRtx)
+				{
+					const size_t encodingIdx    = rtpStream->GetEncodingIdx();
+					const uint32_t rtpTimestamp = packet->GetTimestamp();
+					const uint64_t arrivalMs    = DepLibUV::GetTimeMs();
+
+					if (encodingIdx < RTC::SimulcastLayerCount)
+					{
+						/*
+						 * 같은 source frame의 simulcast encoding들은 SFU에 거의 동시에
+						 * 들어온다. 30 fps frame interval(~33ms)의 절반보다 충분히 작은
+						 * 10ms를 calibration matching window로 사용한다.
+						 */
+						static constexpr uint64_t CalibrationWindowMs{ 10u };
+
+						/*
+						 * -------------------------------------------------------
+						 * 1. Reference encoding (encodingIdx == 0)
+						 * -------------------------------------------------------
+						 *
+						 * L0 RTP timestamp 자체를 canonical logicalFrameId로 사용한다.
+						 */
+						if (encodingIdx == FrameMetaReferenceEncodingIdx)
+						{
+							const uint32_t logicalFrameId = rtpTimestamp;
+
+							// ============================================================
+							// yeon: logical RTP clock -> SFU monotonic clock anchor
+							// reference encoding(L0)의 최초 frame에서 딱 한 번 설정.
+							// ============================================================
+							RTC::LogicalFrameClockMapper::Instance().InitializeIfNeeded(
+							  this->id, logicalFrameId, arrivalMs);
+
+							this->hasFrameMetaReferenceSample        = true;
+							this->lastFrameMetaReferenceRtpTimestamp = rtpTimestamp;
+							this->lastFrameMetaReferenceArrivalMs    = arrivalMs;
+
+							/*
+							 * L1/L2가 이 L0보다 먼저 도착해서 calibration을
+							 * 기다리고 있었다면 여기서 offset을 확정한다.
+							 */
+							for (auto& kv : this->pendingFrameMetaCalibrationByEncoding)
+							{
+								const size_t pendingEncodingIdx = kv.first;
+								auto& pending                   = kv.second;
+
+								if (!pending.valid)
+								{
+									continue;
+								}
+
+								// 이미 calibration된 encoding이면 pending은 더 이상 필요 없다.
+								if (
+								  this->frameMetaTimestampOffsetByEncoding.find(pendingEncodingIdx) !=
+								  this->frameMetaTimestampOffsetByEncoding.end())
+								{
+									pending.valid = false;
+									continue;
+								}
+
+								const uint64_t timeDiffMs = arrivalMs >= pending.arrivalMs
+								                              ? arrivalMs - pending.arrivalMs
+								                              : pending.arrivalMs - arrivalMs;
+
+								/*
+								 * 충분히 가까운 시각에 들어온 encoded frame이면
+								 * 같은 source frame으로 보고 고정 RTP offset을 계산한다.
+								 *
+								 * uint32_t 연산이므로 RTP timestamp wrap-around도
+								 * modulo 2^32 방식으로 처리된다.
+								 */
+								if (timeDiffMs <= CalibrationWindowMs)
+								{
+									const uint32_t offset = rtpTimestamp - pending.rtpTimestamp;
+
+									this->frameMetaTimestampOffsetByEncoding[pendingEncodingIdx] = offset;
+
+									/*
+									 * pending frame 자체도 현재 reference frame과 같은
+									 * logical frame이므로 Registry에 넣어준다.
+									 */
+									RTC::LogicalFrameSizeRegistry::Instance().Update(
+									  this->id, logicalFrameId, pendingEncodingIdx, pending.frameSizeBytes);
+
+									MS_ERROR_STD(
+									  "[FRAME-CALIBRATE] "
+									  "producer=%s encodingIdx=%zu "
+									  "offset=%" PRIu32 " refTs=%" PRIu32 " layerTs=%" PRIu32 " diffMs=%" PRIu64,
+									  this->id.c_str(),
+									  pendingEncodingIdx,
+									  offset,
+									  rtpTimestamp,
+									  pending.rtpTimestamp,
+									  timeDiffMs);
+
+									pending.valid = false;
+								}
+							}
+
+							/*
+							 * Reference L0 자체의 실제 frame size 저장.
+							 */
+							RTC::LogicalFrameSizeRegistry::Instance().Update(
+							  this->id, logicalFrameId, encodingIdx, metaFrameSizeBytes);
+
+							/*
+							 * Router -> Consumer -> WebRtcTransport로
+							 * canonical logicalFrameId 전달.
+							 */
+							packet->SetFrameMeta(metaFrameId, metaFrameSizeBytes, logicalFrameId);
+
+							// MS_ERROR_STD(
+							//   "[FRAME-SIZE-INGRESS] "
+							//   "producer=%s encodingIdx=%zu logical=%" PRIu32 " rtpTs=%" PRIu32
+							//   " senderFrameId=%" PRIu32 " size=%" PRIu32,
+							//   this->id.c_str(),
+							//   encodingIdx,
+							//   logicalFrameId,
+							//   rtpTimestamp,
+							//   metaFrameId,
+							//   metaFrameSizeBytes);
+						}
+						else
+						{
+							/*
+							 * -------------------------------------------------------
+							 * 2. Non-reference encoding (L1/L2)
+							 * -------------------------------------------------------
+							 */
+
+							auto offsetIt = this->frameMetaTimestampOffsetByEncoding.find(encodingIdx);
+
+							/*
+							 * 이미 calibration이 끝난 encoding.
+							 */
+							if (offsetIt != this->frameMetaTimestampOffsetByEncoding.end())
+							{
+								const uint32_t logicalFrameId = rtpTimestamp + offsetIt->second;
+
+								RTC::LogicalFrameSizeRegistry::Instance().Update(
+								  this->id, logicalFrameId, encodingIdx, metaFrameSizeBytes);
+
+								packet->SetFrameMeta(metaFrameId, metaFrameSizeBytes, logicalFrameId);
+
+								// MS_ERROR_STD(
+								//   "[FRAME-SIZE-INGRESS] "
+								//   "producer=%s encodingIdx=%zu logical=%" PRIu32 " rtpTs=%" PRIu32
+								//   " senderFrameId=%" PRIu32 " size=%" PRIu32,
+								//   this->id.c_str(),
+								//   encodingIdx,
+								//   logicalFrameId,
+								//   rtpTimestamp,
+								//   metaFrameId,
+								//   metaFrameSizeBytes);
+							}
+							else
+							{
+								/*
+								 * 아직 calibration 전.
+								 *
+								 * 최근 L0가 먼저 들어와 있고 시간 차이가 충분히 작다면
+								 * 바로 같은 source frame으로 calibration한다.
+								 */
+								bool calibratedNow{ false };
+
+								if (this->hasFrameMetaReferenceSample)
+								{
+									const uint64_t timeDiffMs = arrivalMs >= this->lastFrameMetaReferenceArrivalMs
+									                              ? arrivalMs - this->lastFrameMetaReferenceArrivalMs
+									                              : this->lastFrameMetaReferenceArrivalMs - arrivalMs;
+
+									if (timeDiffMs <= CalibrationWindowMs)
+									{
+										const uint32_t offset = this->lastFrameMetaReferenceRtpTimestamp - rtpTimestamp;
+
+										this->frameMetaTimestampOffsetByEncoding[encodingIdx] = offset;
+
+										const uint32_t logicalFrameId = rtpTimestamp + offset;
+
+										RTC::LogicalFrameSizeRegistry::Instance().Update(
+										  this->id, logicalFrameId, encodingIdx, metaFrameSizeBytes);
+
+										packet->SetFrameMeta(metaFrameId, metaFrameSizeBytes, logicalFrameId);
+
+										MS_ERROR_STD(
+										  "[FRAME-CALIBRATE] "
+										  "producer=%s encodingIdx=%zu "
+										  "offset=%" PRIu32 " refTs=%" PRIu32 " layerTs=%" PRIu32 " diffMs=%" PRIu64,
+										  this->id.c_str(),
+										  encodingIdx,
+										  offset,
+										  this->lastFrameMetaReferenceRtpTimestamp,
+										  rtpTimestamp,
+										  timeDiffMs);
+
+										// MS_ERROR_STD(
+										//   "[FRAME-SIZE-INGRESS] "
+										//   "producer=%s encodingIdx=%zu logical=%" PRIu32 " rtpTs=%" PRIu32
+										//   " senderFrameId=%" PRIu32 " size=%" PRIu32,
+										//   this->id.c_str(),
+										//   encodingIdx,
+										//   logicalFrameId,
+										//   rtpTimestamp,
+										//   metaFrameId,
+										//   metaFrameSizeBytes);
+
+										calibratedNow = true;
+									}
+								}
+
+								/*
+								 * L0가 아직 같은 frame에 대해 안 들어온 경우.
+								 *
+								 * 이 packet의 정보만 잠깐 저장하고,
+								 * 다음 L0 packet이 들어왔을 때 calibration한다.
+								 *
+								 * 아직 logicalFrameId를 모르므로 이 packet에는
+								 * SetFrameMeta()를 하지 않는다.
+								 */
+								if (!calibratedNow)
+								{
+									auto& pending = this->pendingFrameMetaCalibrationByEncoding[encodingIdx];
+
+									pending.valid          = true;
+									pending.rtpTimestamp   = rtpTimestamp;
+									pending.metaFrameId    = metaFrameId;
+									pending.frameSizeBytes = metaFrameSizeBytes;
+									pending.arrivalMs      = arrivalMs;
+								}
+							}
+						}
+					}
+				}
+			}
 		}
 
 		if (packet->IsKeyFrame())
@@ -1554,7 +2000,7 @@ namespace RTC
 		{
 			auto rtpPacketDump = packet->FillBuffer(this->shared->channelNotifier->GetBufferBuilder());
 			auto traceInfo     = FBS::Producer::CreateKeyFrameTraceInfo(
-        this->shared->channelNotifier->GetBufferBuilder(), rtpPacketDump, isRtx);
+			  this->shared->channelNotifier->GetBufferBuilder(), rtpPacketDump, isRtx);
 
 			auto notification = FBS::Producer::CreateTraceNotification(
 			  this->shared->channelNotifier->GetBufferBuilder(),
@@ -1570,7 +2016,7 @@ namespace RTC
 		{
 			auto rtpPacketDump = packet->FillBuffer(this->shared->channelNotifier->GetBufferBuilder());
 			auto traceInfo     = FBS::Producer::CreateRtpTraceInfo(
-        this->shared->channelNotifier->GetBufferBuilder(), rtpPacketDump, isRtx);
+			  this->shared->channelNotifier->GetBufferBuilder(), rtpPacketDump, isRtx);
 
 			auto notification = FBS::Producer::CreateTraceNotification(
 			  this->shared->channelNotifier->GetBufferBuilder(),

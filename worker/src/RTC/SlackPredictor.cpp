@@ -1,7 +1,7 @@
 #include "RTC/SlackPredictor.hpp"
+
 #include <algorithm>
 #include <cmath>
-#include <limits>
 
 namespace RTC
 {
@@ -13,54 +13,168 @@ namespace RTC
 	{
 	}
 
-	void SlackPredictor::AddSample(const SlackSample& sample)
+	bool SlackPredictor::AddSample(const SlackSample& sample)
 	{
+		if (!IsValidFeature(sample.feature) || !std::isfinite(sample.decodeSlackMs))
+		{
+			return false;
+		}
+
+		const size_t spatialLayer = static_cast<size_t>(sample.action.spatialLayer);
+
+		if (spatialLayer >= this->spatialLayerSampleCounts.size())
+		{
+			return false;
+		}
+
 		std::lock_guard<std::mutex> lock(this->mutex);
 
-		this->samples.push_back(sample);
-
-		while (this->samples.size() > this->config.maxSamples)
+		if (sample.origin == KnnSampleOrigin::COLD_START)
 		{
-			this->samples.pop_front();
+			// Cold Start samples are retained permanently.
+			this->coldStartSamples.push_back(sample);
+			++this->spatialLayerSampleCounts[spatialLayer];
 		}
+		else
+		{
+			// Online samples use FIFO aging only within the online pool.
+			this->onlineSamples.push_back(sample);
+			++this->spatialLayerSampleCounts[spatialLayer];
+
+			while (this->onlineSamples.size() > this->config.maxOnlineSamples)
+			{
+				const auto& oldSample = this->onlineSamples.front();
+				const size_t oldSpatialLayer = static_cast<size_t>(oldSample.action.spatialLayer);
+
+				if (
+				  oldSpatialLayer < this->spatialLayerSampleCounts.size() &&
+				  this->spatialLayerSampleCounts[oldSpatialLayer] > 0u)
+				{
+					--this->spatialLayerSampleCounts[oldSpatialLayer];
+				}
+
+				this->onlineSamples.pop_front();
+			}
+		}
+
+		if (!this->initialSpatialCoverageSatisfied)
+		{
+			const bool l0Ready =
+			  this->spatialLayerSampleCounts[0] >= this->config.minSamplesPerSpatialLayer;
+			const bool l1Ready =
+			  this->spatialLayerSampleCounts[1] >= this->config.minSamplesPerSpatialLayer;
+			const bool l2Ready =
+			  this->spatialLayerSampleCounts[2] >= this->config.minSamplesPerSpatialLayer;
+
+			if (l0Ready && l1Ready && l2Ready)
+			{
+				this->initialSpatialCoverageSatisfied = true;
+			}
+		}
+
+		return true;
 	}
 
 	size_t SlackPredictor::GetSampleCount() const
 	{
 		std::lock_guard<std::mutex> lock(this->mutex);
-		return this->samples.size();
+
+		return this->coldStartSamples.size() + this->onlineSamples.size();
+	}
+
+	size_t SlackPredictor::GetColdStartSampleCount() const
+	{
+		std::lock_guard<std::mutex> lock(this->mutex);
+
+		return this->coldStartSamples.size();
+	}
+
+	size_t SlackPredictor::GetOnlineSampleCount() const
+	{
+		std::lock_guard<std::mutex> lock(this->mutex);
+
+		return this->onlineSamples.size();
+	}
+
+	bool SlackPredictor::CanPredictLocked() const
+	{
+		const size_t totalSamples = this->coldStartSamples.size() + this->onlineSamples.size();
+
+		return totalSamples >= this->config.minSamplesToPredict &&
+		       this->initialSpatialCoverageSatisfied;
 	}
 
 	bool SlackPredictor::CanPredict() const
 	{
 		std::lock_guard<std::mutex> lock(this->mutex);
-		return this->samples.size() >= this->config.minSamplesToPredict;
+		return CanPredictLocked();
 	}
 
-	std::optional<double> SlackPredictor::PredictSlackMs(const SlackFeature& feature) const
+	bool SlackPredictor::IsSameAction(
+	  const SlackActionIdentity& a, const SlackActionIdentity& b) const
 	{
-		std::lock_guard<std::mutex> lock(this->mutex);
+		return a.spatialLayer == b.spatialLayer &&
+		       a.fecProtectionFactor == b.fecProtectionFactor &&
+		       a.pacingEnabled == b.pacingEnabled;
+	}
 
-		if (this->samples.size() < this->config.minSamplesToPredict)
+	std::optional<RTC::SlackPrediction> SlackPredictor::Predict(
+	  const SlackFeature& feature, const SlackActionIdentity& action) const
+	{
+		if (!IsValidFeature(feature))
 		{
 			return std::nullopt;
 		}
 
-		std::vector<Neighbor> neighbors;
-		neighbors.reserve(this->samples.size());
+		std::lock_guard<std::mutex> lock(this->mutex);
 
-		for (const auto& sample : this->samples)
+		if (!CanPredictLocked())
 		{
-			double distance = ComputeDistance(feature, sample.feature);
+			return std::nullopt;
+		}
 
-			Neighbor n;
-			n.distance = distance;
-			n.slackMs  = sample.slackMs;
+		const size_t totalSampleCount = this->coldStartSamples.size() + this->onlineSamples.size();
 
-			neighbors.push_back(n);
+		std::vector<Neighbor> neighbors;
+		neighbors.reserve(totalSampleCount);
+
+		const auto appendNeighbors = [&](const std::deque<SlackSample>& samples)
+		{
+			for (const auto& sample : samples)
+			{
+				if (
+				  RTC::KnnExperiment::ActionConditionedPredictionEnabled &&
+				  !IsSameAction(action, sample.action))
+				{
+					continue;
+				}
+
+				Neighbor neighbor;
+				neighbor.distance = ComputeDistance(feature, action, sample.feature, sample.action);
+				neighbor.decodeSlackMs = sample.decodeSlackMs;
+				neighbor.deadlineMiss = sample.deadlineMiss;
+				neighbor.sample = &sample;
+
+				neighbors.push_back(neighbor);
+			}
+		};
+
+		appendNeighbors(this->coldStartSamples);
+		appendNeighbors(this->onlineSamples);
+
+		// In action-conditioned mode, do not fabricate a prediction from fewer
+		// than k exact-action historical samples.
+		if (RTC::KnnExperiment::ActionConditionedPredictionEnabled && neighbors.size() < this->config.k)
+		{
+			return std::nullopt;
 		}
 
 		const size_t k = std::min(this->config.k, neighbors.size());
+
+		if (k == 0u)
+		{
+			return std::nullopt;
+		}
 
 		std::partial_sort(
 		  neighbors.begin(),
@@ -68,103 +182,121 @@ namespace RTC
 		  neighbors.end(),
 		  [](const Neighbor& a, const Neighbor& b) { return a.distance < b.distance; });
 
-		double weightedSum = 0.0;
-		double weightSum   = 0.0;
+		SlackPrediction prediction;
+		prediction.sampleCount   = totalSampleCount;
+		prediction.neighborCount = k;
 
-		for (size_t i = 0; i < k; ++i)
+		prediction.debugNeighborCount = std::min(k, KnnDebugNeighborCount);
+
+		for (size_t i{ 0u }; i < prediction.debugNeighborCount; ++i)
 		{
-			const double d = neighbors[i].distance;
-			const double w = 1.0 / (d + this->config.epsilon);
+			const auto& neighbor = neighbors[i];
 
-			weightedSum += w * neighbors[i].slackMs;
-			weightSum += w;
+			if (!neighbor.sample)
+			{
+				continue;
+			}
+
+			auto& debug         = prediction.debugNeighbors[i];
+			debug.frameId       = neighbor.sample->frameId;
+			debug.distance      = neighbor.distance;
+			debug.feature       = neighbor.sample->feature;
+			debug.action        = neighbor.sample->action;
+			debug.decodeSlackMs = neighbor.sample->decodeSlackMs;
+			debug.deadlineMiss  = neighbor.sample->deadlineMiss;
 		}
 
-		if (weightSum <= 0.0)
+		double decodeSlackSumMs{ 0.0 };
+		size_t deadlineMissCount{ 0u };
+
+		for (size_t i{ 0u }; i < k; ++i)
 		{
-			return std::nullopt;
+			const auto& neighbor = neighbors[i];
+			decodeSlackSumMs += neighbor.decodeSlackMs;
+
+			if (neighbor.deadlineMiss)
+			{
+				++deadlineMissCount;
+			}
 		}
 
-		return weightedSum / weightSum;
+		prediction.predictedDecodeSlackMs = decodeSlackSumMs / static_cast<double>(k);
+		prediction.deadlineMissProbability =
+		  static_cast<double>(deadlineMissCount) / static_cast<double>(k);
+
+		return prediction;
 	}
 
-	double SlackPredictor::PredictHeuristicSlackScore(const SlackFeature& feature) const
+	double SlackPredictor::ComputeDistance(
+	  const SlackFeature& aFeature,
+	  const SlackActionIdentity& aAction,
+	  const SlackFeature& bFeature,
+	  const SlackActionIdentity& bAction) const
 	{
-		// This is not "true slack".
-		// It is just a simple risk/stress-like score for fallback.
-		const double rttN     = Normalize(feature.rttMs, this->config.rttScale);
-		const double lossN    = Normalize(feature.lossRate, this->config.lossScale);
-		const double queueN   = Normalize(feature.aceQueueBytes, this->config.aceQueueScale);
-		const double backlogN = Normalize(feature.pacingBacklogBytes, this->config.pacingBacklogScale);
-		// const double frameN   = Normalize(feature.frameSizeBytes, this->config.frameSizeScale);
+		const double dRtt =
+		  NormalizeDifference(aFeature.rttMs, bFeature.rttMs, this->config.rttScaleMs);
+		const double dLoss =
+		  NormalizeDifference(aFeature.lossRate, bFeature.lossRate, this->config.lossScale);
+		const double dBw = NormalizeDifference(
+		  aFeature.availableBitrateBps,
+		  bFeature.availableBitrateBps,
+		  this->config.bandwidthScaleBps);
+		const double dCongestion = NormalizeDifference(
+		  aFeature.congestion, bFeature.congestion, this->config.congestionScale);
+		const double dFrameSize = NormalizeDifference(
+		  aFeature.frameSizeBytes, bFeature.frameSizeBytes, this->config.frameSizeScaleBytes);
+		const double dPacingDelay = NormalizeDifference(
+		  aFeature.pacingDelayMs, bFeature.pacingDelayMs, this->config.pacingDelayScaleMs);
 
-		// Higher value means more "stress"/urgency
-		const double score = 0.20 * rttN + 0.20 * lossN + 0.30 * queueN + 0.20 * backlogN + 0.10;
+		// Legacy action-distance terms. In action-conditioned mode all three are
+		// zero because non-identical actions were filtered before this call.
+		const double dSpatialLayer =
+		  aAction.spatialLayer == bAction.spatialLayer ? 0.0 : this->config.spatialLayerMismatchDistance;
 
-		return score;
+		const double dFec = NormalizeDifference(
+		  static_cast<double>(aAction.fecProtectionFactor),
+		  static_cast<double>(bAction.fecProtectionFactor),
+		  this->config.fecProtectionScale);
+
+		const double dPacing =
+		  aAction.pacingEnabled == bAction.pacingEnabled ? 0.0 : this->config.pacingMismatchDistance;
+
+		const double squaredDistance =
+		  dRtt * dRtt + dLoss * dLoss + dBw * dBw + dCongestion * dCongestion +
+		  dFrameSize * dFrameSize + dPacingDelay * dPacingDelay +
+		  dSpatialLayer * dSpatialLayer + dFec * dFec + dPacing * dPacing;
+
+		return std::sqrt(squaredDistance);
+	}
+
+	double SlackPredictor::NormalizeDifference(double a, double b, double scale) const
+	{
+		if (scale <= 0.0)
+		{
+			return a - b;
+		}
+
+		return (a - b) / scale;
+	}
+
+	bool SlackPredictor::IsValidFeature(const SlackFeature& feature) const
+	{
+		return std::isfinite(feature.rttMs) &&
+		       std::isfinite(feature.lossRate) &&
+		       std::isfinite(feature.availableBitrateBps) &&
+		       std::isfinite(feature.congestion) &&
+		       std::isfinite(feature.frameSizeBytes) &&
+		       std::isfinite(feature.pacingDelayMs);
 	}
 
 	void SlackPredictor::Clear()
 	{
 		std::lock_guard<std::mutex> lock(this->mutex);
-		this->samples.clear();
+
+		this->coldStartSamples.clear();
+		this->onlineSamples.clear();
+		this->spatialLayerSampleCounts.fill(0u);
+		this->initialSpatialCoverageSatisfied = false;
 	}
 
-	double SlackPredictor::ComputeDistance(const SlackFeature& a, const SlackFeature& b) const
-	{
-		const double artt  = Normalize(a.rttMs, this->config.rttScale);
-		const double aloss = Normalize(a.lossRate, this->config.lossScale);
-		const double aq    = Normalize(a.aceQueueBytes, this->config.aceQueueScale);
-		const double ab    = Normalize(a.pacingBacklogBytes, this->config.pacingBacklogScale);
-		// const double af    = Normalize(a.frameSizeBytes, this->config.frameSizeScale);
-		// const double apc   = Normalize(a.packetCount, this->config.packetCountScale);
-		// const double atl   = Normalize(a.temporalLayer, this->config.temporalLayerScale);
-		// const double akf   = Normalize(a.isKeyFrame, this->config.isKeyFrameScale);
-
-		const double brtt  = Normalize(b.rttMs, this->config.rttScale);
-		const double bloss = Normalize(b.lossRate, this->config.lossScale);
-		const double bq    = Normalize(b.aceQueueBytes, this->config.aceQueueScale);
-		const double bb    = Normalize(b.pacingBacklogBytes, this->config.pacingBacklogScale);
-		// const double bf    = Normalize(b.frameSizeBytes, this->config.frameSizeScale);
-		// const double bpc   = Normalize(b.packetCount, this->config.packetCountScale);
-		// const double btl   = Normalize(b.temporalLayer, this->config.temporalLayerScale);
-		// const double bkf   = Normalize(b.isKeyFrame, this->config.isKeyFrameScale);
-
-		const double drtt  = artt - brtt;
-		const double dloss = aloss - bloss;
-		const double dq    = aq - bq;
-		const double db    = ab - bb;
-		// const double df    = af - bf;
-		// const double dpc   = apc - bpc;
-		// const double dtl   = atl - btl;
-		// const double dkf   = akf - bkf;
-
-		const double sum = this->config.wRtt * drtt * drtt + this->config.wLoss * dloss * dloss +
-		                   this->config.wAceQueue * dq * dq + this->config.wPacingBacklog * db * db;
-						//    + this->config.wFrameSize * df * df + this->config.wPacketCount * dpc * dpc 
-						//    + this->config.wTemporalLayer * dtl * dtl + this->config.wIsKeyFrame * dkf * dkf;
-
-		return std::sqrt(sum);
-	}
-
-	double SlackPredictor::Normalize(double value, double scale) const
-	{
-		value = ClampNonNegative(value);
-
-		if (scale <= 0.0)
-		{
-			return value;
-		}
-
-		return value / scale;
-	}
-
-	double SlackPredictor::ClampNonNegative(double value) const
-	{
-		if (value < 0.0)
-		{
-			return 0.0;
-		}
-		return value;
-	}
 } // namespace RTC

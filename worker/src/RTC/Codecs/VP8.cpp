@@ -10,6 +10,9 @@ namespace RTC
 	namespace Codecs
 	{
 		/* Class methods. */
+		static constexpr uint8_t FRAME_META_MAGIC_LE[4]{ 0x31, 0x4D, 0x53, 0x46 };
+
+		static constexpr size_t FRAME_META_HEADER_LEN{ 12u };
 
 		VP8::PayloadDescriptor* VP8::Parse(const uint8_t* data, size_t len)
 		{
@@ -31,7 +34,7 @@ namespace RTC
 			payloadDescriptor->nonReference   = (byte >> 5) & 0x01;
 			payloadDescriptor->start          = (byte >> 4) & 0x01;
 			payloadDescriptor->partitionIndex = byte & 0x0F; // ✅ 4 bits 이게 문제라고???
-			//payloadDescriptor->partitionIndex = byte & 0x07;
+			// payloadDescriptor->partitionIndex = byte & 0x07;
 
 			if (payloadDescriptor->extended)
 			{
@@ -113,17 +116,70 @@ namespace RTC
 				payloadDescriptor->keyIndex   = byte & 0x1F;
 			}
 
-			// clang-format off
-			if (
-				// NOLINTNEXTLINE (bugprone-inc-dec-in-conditions)
-				(len >= ++offset + 1) &&
-				payloadDescriptor->start &&
-				payloadDescriptor->partitionIndex == 0 &&
-				(!(data[offset] & 0x01)) // Inverse Keyframe bit.
-			)
-			// clang-format on
+			// // clang-format off
+			// if (
+			// 	// NOLINTNEXTLINE (bugprone-inc-dec-in-conditions)
+			// 	(len >= ++offset + 1) &&
+			// 	payloadDescriptor->start &&
+			// 	payloadDescriptor->partitionIndex == 0 &&
+			// 	(!(data[offset] & 0x01)) // Inverse Keyframe bit.
+			// )
+			// // clang-format on
+			// {
+			// 	payloadDescriptor->isKeyFrame = true;
+			// }
+
+			// Move from the last VP8 payload descriptor byte
+			// to the first byte of the VP8 encoded payload.
+			++offset;
+
+			// Keyframe information exists in the first partition,
+			// first packet of the VP8 frame.
+			if (len >= offset + 1 && payloadDescriptor->start && payloadDescriptor->partitionIndex == 0)
 			{
-				payloadDescriptor->isKeyFrame = true;
+				size_t vp8PayloadOffset = offset;
+
+				// yeon:
+				// Insertable Streams metadata layout:
+				//
+				// [VP8 Payload Descriptor]
+				// [12-byte FRAME_META]
+				// [real VP8 encoded payload]
+				//
+				// Do NOT remove the metadata here.
+				// Just skip it while inspecting the VP8 frame type.
+				if (
+				  len >= vp8PayloadOffset + FRAME_META_HEADER_LEN &&
+				  std::memcmp(data + vp8PayloadOffset, FRAME_META_MAGIC_LE, sizeof(FRAME_META_MAGIC_LE)) == 0)
+				{
+					vp8PayloadOffset += FRAME_META_HEADER_LEN;
+
+					// if (len >= vp8PayloadOffset + 1)
+					// {
+					// 	MS_ERROR_STD(
+					// 	  "[VP8-META-DEBUG] "
+					// 	  "meta found descriptorEnd=%zu "
+					// 	  "realVp8Offset=%zu "
+					// 	  "realFirstByte=0x%02x "
+					// 	  "keyBit=%u",
+					// 	  offset,
+					// 	  vp8PayloadOffset,
+					// 	  data[vp8PayloadOffset],
+					// 	  data[vp8PayloadOffset] & 0x01);
+					// }
+				}
+
+				// There must still be at least one byte of actual VP8 payload.
+				if (len >= vp8PayloadOffset + 1)
+				{
+					// VP8 uncompressed data chunk:
+					// bit 0 = 0 -> key frame
+					// bit 0 = 1 -> inter frame
+					if (!(data[vp8PayloadOffset] & 0x01))
+					{
+						payloadDescriptor->isKeyFrame = true;
+					}
+				}
 			}
 
 			return payloadDescriptor.release();
@@ -258,12 +314,10 @@ namespace RTC
 		{
 			MS_TRACE();
 
-			// clang-format off
-			if (
-				this->hasPictureId &&
-				this->hasTl0PictureIndex
-			)
-			// clang-format on
+			// Restore whichever codec-level identifiers were present in the
+			// original payload descriptor. This is required after PictureID-only
+			// rewriting as well (for example L1T1 VP8).
+			if (this->hasPictureId || this->hasTl0PictureIndex)
 			{
 				Encode(data, this->pictureId, this->tl0PictureIndex);
 			}
@@ -298,19 +352,33 @@ namespace RTC
 				MS_WARN_DEV("stream is supposed to have >1 temporal layers but does not have TlIndex field");
 			}
 
-			// Check whether pictureId and tl0PictureIndex sync is required.
-			// clang-format off
-			if (
-				context->syncRequired &&
-				this->payloadDescriptor->hasPictureId &&
-				this->payloadDescriptor->hasTl0PictureIndex
-			)
-			// clang-format on
+			// Synchronize codec-level identifiers when switching simulcast spatial layers.
+			//
+			// L1T1 VP8 may carry PictureID without TL0PICIDX. In that case PictureID
+			// alone must be synchronized so the Consumer exposes one continuous VP8
+			// PictureID sequence across simulcast encodings.
+			if (context->syncRequired)
 			{
-				context->pictureIdManager.Sync(this->payloadDescriptor->pictureId - 1);
-				context->tl0PictureIndexManager.Sync(this->payloadDescriptor->tl0PictureIndex - 1);
+				if (context->GetTemporalLayers() <= 1)
+				{
+					if (this->payloadDescriptor->hasPictureId)
+					{
+						context->pictureIdManager.Sync(this->payloadDescriptor->pictureId - 1);
+						context->syncRequired = false;
+					}
+				}
+				else if (
+				  this->payloadDescriptor->hasPictureId &&
+				  this->payloadDescriptor->hasTl0PictureIndex)
+				{
+					// Preserve the existing temporal-layer behavior: synchronize both
+					// PictureID and TL0PICIDX together.
+					context->pictureIdManager.Sync(this->payloadDescriptor->pictureId - 1);
+					context->tl0PictureIndexManager.Sync(
+					  this->payloadDescriptor->tl0PictureIndex - 1);
 
-				context->syncRequired = false;
+					context->syncRequired = false;
+				}
 			}
 
 			// Incremental pictureId. Check the temporal layer.
@@ -347,9 +415,10 @@ namespace RTC
 				}
 			}
 
-			// Update pictureId and tl0PictureIndex values.
-			uint16_t pictureId;
-			uint8_t tl0PictureIndex;
+			// Update pictureId and tl0PictureIndex values. Initialize both because
+			// either VP8 descriptor field may be absent.
+			uint16_t pictureId{ 0u };
+			uint8_t tl0PictureIndex{ 0u };
 
 			// Do not send a dropped pictureId.
 			// clang-format off
@@ -400,12 +469,15 @@ namespace RTC
 				return false;
 			}
 
-			// clang-format off
-			if (
-				this->payloadDescriptor->hasPictureId &&
-				this->payloadDescriptor->hasTl0PictureIndex
-			)
-			// clang-format on
+			// Rewrite PictureID for L1T1 even when TL0PICIDX is absent.
+			// For streams with temporal scalability, preserve the existing behavior
+			// and rewrite PictureID/TL0PICIDX together.
+			const bool rewritePictureIdOnly =
+			  context->GetTemporalLayers() <= 1 && this->payloadDescriptor->hasPictureId;
+			const bool rewritePictureIdAndTl0 =
+			  this->payloadDescriptor->hasPictureId && this->payloadDescriptor->hasTl0PictureIndex;
+
+			if (rewritePictureIdOnly || rewritePictureIdAndTl0)
 			{
 				// Store the encoding data for retransmissions.
 				this->payloadDescriptor->CreateEncoder({ pictureId, tl0PictureIndex });
@@ -429,12 +501,9 @@ namespace RTC
 		{
 			MS_TRACE();
 
-			// clang-format off
 			if (
-				this->payloadDescriptor->hasPictureId &&
-				this->payloadDescriptor->hasTl0PictureIndex
-			)
-			// clang-format on
+			  this->payloadDescriptor->hasPictureId ||
+			  this->payloadDescriptor->hasTl0PictureIndex)
 			{
 				this->payloadDescriptor->Restore(packet->GetPayload());
 			}

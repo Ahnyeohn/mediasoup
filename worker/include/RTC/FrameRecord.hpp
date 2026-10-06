@@ -9,10 +9,24 @@
 
 #include <string>
 
+#include <array>
+#include <deque>
+
 #include "RTC/NetworkState.hpp"
+#include "RTC/SlackPredictor.hpp"
 
 namespace RTC
 {
+	// yeon: frame record용 임시 registry => layer와 각 layer에 따른 프레임 사이즈
+	static constexpr size_t SimulcastLayerCount{ 3u };
+
+	struct LogicalFrameSizeSnapshot
+	{
+		std::array<bool, SimulcastLayerCount> available{ false, false, false };
+
+		std::array<uint32_t, SimulcastLayerCount> sizeBytes{ 0u, 0u, 0u };
+	};
+
 	struct PacketReceiveInfo
 	{
 		uint16_t sequenceNumber{ 0 };
@@ -100,6 +114,15 @@ namespace RTC
 		bool hasQueueResidenceMs{ false };
 		double queueResidenceMs{ 0.0 };
 
+		// RTP timestamp rewrite로 인해 outgoing timestamp가
+		// logical timestamp에서 얼마나 이동했는지.
+		bool hasRtpTimestampRewriteOffsetMs{ false };
+		double rtpTimestampRewriteOffsetMs{ 0.0 };
+
+		// RTP rewrite 영향을 제거한 KNN용 logical slack.
+		bool hasDecodeSlackLogicalMs{ false };
+		double decodeSlackLogicalMs{ 0.0 };
+
 		bool hasFrameBufferResidenceMs{ false };
 		double frameBufferResidenceMs{ 0.0 };
 
@@ -134,6 +157,47 @@ namespace RTC
 
 		uint8_t fecProtectionFactor{ 0u };
 		double fecRedundancyPercent{ 0.0 };
+
+		// yeon: frame record: 각 layer 별 frame size
+		bool hasLogicalFrameId{ false };
+		uint32_t logicalFrameId{ 0 };
+
+		std::array<bool, SimulcastLayerCount> hasLayerEncodedFrameSize{ false, false, false };
+
+		std::array<uint32_t, SimulcastLayerCount> layerEncodedFrameSizeBytes{ 0u, 0u, 0u };
+
+		// yeon: VP8 PictureID trace.
+		// Incoming: Producer에서 수신한 원래 VP8 PictureID.
+		// Outgoing: Consumer로 forwarding할 때 rewrite 이후 실제 VP8 PictureID.
+		bool hasVp8PictureIdTrace{ false };
+
+		bool hasIncomingPictureId{ false };
+		uint16_t incomingPictureId{ 0u };
+
+		bool hasOutgoingPictureId{ false };
+		uint16_t outgoingPictureId{ 0u };
+
+		// VP8 descriptor에 TL0PICIDX가 실제 존재했는지.
+		bool vp8HasTl0PictureIndex{ false };
+
+		// 해당 frame 처리 중 PictureID sync/rewrite가 실제 수행되었는지.
+		// 여러 RTP packet으로 구성된 frame이므로 packet별 값을 OR해서 저장.
+		bool pictureIdSyncApplied{ false };
+		bool pictureIdRewriteApplied{ false };
+
+		// yeon: kNN training용 decision-time feature.
+		// 실제로 해당 frame에 적용된 action의 feature만 저장.
+		bool hasSlackActionDecision{ false };
+		RTC::SlackActionDecision slackActionDecision;
+
+		// 동일 Slack feedback 중복 등으로
+		// 같은 sample이 predictor에 두 번 들어가는 것을 방지.
+		bool knnSampleAdded{ false };
+
+		// SFU-side frame outcome classification.
+		bool hasFrameOutcome{ false };
+		bool deadlineMiss{ false };
+		RTC::FrameOutcome frameOutcome{ RTC::FrameOutcome::NORMAL };
 	};
 
 	struct FrameBuilder
@@ -173,6 +237,30 @@ namespace RTC
 
 		uint8_t fecProtectionFactor{ 0u };
 		double fecRedundancyPercent{ 0.0 };
+
+		// yeon: layer 별 frame size
+		bool hasLogicalFrameId{ false };
+		uint32_t logicalFrameId{ 0 };
+
+		std::array<bool, SimulcastLayerCount> hasLayerEncodedFrameSize{ false, false, false };
+
+		std::array<uint32_t, SimulcastLayerCount> layerEncodedFrameSizeBytes{ 0u, 0u, 0u };
+
+		// yeon: VP8 PictureID trace.
+		bool hasVp8PictureIdTrace{ false };
+
+		bool hasIncomingPictureId{ false };
+		uint16_t incomingPictureId{ 0u };
+
+		bool hasOutgoingPictureId{ false };
+		uint16_t outgoingPictureId{ 0u };
+
+		bool vp8HasTl0PictureIndex{ false };
+		bool pictureIdSyncApplied{ false };
+		bool pictureIdRewriteApplied{ false };
+
+		bool hasSlackActionDecision{ false };
+		RTC::SlackActionDecision slackActionDecision;
 	};
 
 	class FrameRecordTable
@@ -243,7 +331,6 @@ namespace RTC
 		double GetMinReceiveSlackMs() const;
 		double GetMaxReceiveSlackMs() const;
 
-
 		// yeon: fec
 		void AttachFecRedundancy(uint32_t frameId, uint8_t protectionFactor);
 
@@ -254,6 +341,51 @@ namespace RTC
 		};
 
 		std::unordered_map<uint32_t, PendingFecInfo> pendingFecInfoByFrameId;
+
+		// yeon: layer 별 frame size
+		void AttachIngressFrameSizes(
+		  uint32_t frameId, uint32_t logicalFrameId, const LogicalFrameSizeSnapshot& snapshot);
+
+		void AttachVp8PictureIdTrace(
+		  uint32_t frameId,
+		  bool hasIncomingPictureId,
+		  uint16_t incomingPictureId,
+		  bool hasOutgoingPictureId,
+		  uint16_t outgoingPictureId,
+		  bool hasTl0PictureIndex,
+		  bool pictureIdSyncApplied,
+		  bool pictureIdRewriteApplied);
+		// yeon: slack predict에 사용할 과거 데이터에 실제 action 적용한 결정만 저장
+		void AttachSlackActionDecision(uint32_t frameId, const RTC::SlackActionDecision& decision);
+
+		bool TakeKnnTrainingSample(uint32_t frameId, RTC::SlackSample& sample);
+
+	private:
+		struct PendingIngressFrameSizes
+		{
+			uint32_t logicalFrameId{ 0 };
+			LogicalFrameSizeSnapshot snapshot;
+		};
+
+		std::unordered_map<uint32_t, PendingIngressFrameSizes> pendingIngressFrameSizesByFrameId;
+
+		struct PendingVp8PictureIdTrace
+		{
+			bool hasVp8PictureIdTrace{ false };
+
+			bool hasIncomingPictureId{ false };
+			uint16_t incomingPictureId{ 0u };
+
+			bool hasOutgoingPictureId{ false };
+			uint16_t outgoingPictureId{ 0u };
+
+			bool vp8HasTl0PictureIndex{ false };
+
+			bool pictureIdSyncApplied{ false };
+			bool pictureIdRewriteApplied{ false };
+		};
+
+		std::unordered_map<uint32_t, PendingVp8PictureIdTrace> pendingVp8PictureIdTraceByFrameId;
 
 	private:
 		void FinalizeFrame(uint32_t frameId, uint64_t nowMs, const NetworkSnapshot& snapshot);
@@ -271,6 +403,9 @@ namespace RTC
 
 		// 완료된 frame record
 		std::unordered_map<uint32_t, FrameRecord> completedRecords;
+
+		// yeon: decision이 FrameBuilder 생성보다 먼저 들어올 수 있으므로
+		std::unordered_map<uint32_t, RTC::SlackActionDecision> pendingSlackActionDecisions;
 
 		// 오래된 것 정리용 순서 기록
 		std::vector<uint32_t> completedOrder;
@@ -296,4 +431,60 @@ namespace RTC
 		bool hasExperimentStarted{ false };
 		uint64_t nextExperimentFrameIndex{ 1 };
 	};
+
+	class LogicalFrameSizeRegistry
+	{
+	public:
+		static LogicalFrameSizeRegistry& Instance();
+
+		void Update(
+		  const std::string& producerId, uint32_t logicalFrameId, size_t layer, uint32_t frameSizeBytes);
+
+		bool Get(const std::string& producerId, uint32_t logicalFrameId, LogicalFrameSizeSnapshot& out) const;
+
+	private:
+		struct ProducerFrames
+		{
+			std::unordered_map<uint32_t, LogicalFrameSizeSnapshot> frames;
+			std::deque<uint32_t> order;
+		};
+
+	private:
+		static constexpr size_t MaxFramesPerProducer{ 512u };
+
+		mutable std::mutex mutex;
+
+		std::unordered_map<std::string, ProducerFrames> framesByProducer;
+	};
+
+	class LogicalFrameClockMapper
+	{
+	public:
+		static LogicalFrameClockMapper& Instance();
+
+		// reference layer(L0)의 첫 logical frame으로 anchor 설정.
+		// 이미 설정되어 있으면 아무것도 하지 않는다.
+		void InitializeIfNeeded(const std::string& producerId, uint32_t logicalFrameId, uint64_t sfuTimeMs);
+
+		// logicalFrameId를 SFU monotonic clock(ms)으로 변환.
+		bool ConvertToSfuTimeMs(
+		  const std::string& producerId, uint32_t logicalFrameId, double& outSfuTimeMs) const;
+
+	private:
+		LogicalFrameClockMapper() = default;
+
+		struct ClockAnchor
+		{
+			bool initialized{ false };
+
+			uint32_t baseLogicalFrameId{ 0u };
+			uint64_t baseSfuTimeMs{ 0u };
+		};
+
+	private:
+		mutable std::mutex mutex;
+
+		std::unordered_map<std::string, ClockAnchor> anchorsByProducerId;
+	};
+
 } // namespace RTC
