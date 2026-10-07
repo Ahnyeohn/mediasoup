@@ -3,8 +3,8 @@
 
 #include "RTC/WebRtcTransport.hpp"
 #include "Logger.hpp"
-#include "QosLogger.hpp"
 #include "MediaSoupErrors.hpp"
+#include "QosLogger.hpp"
 #include "Settings.hpp"
 #include "Utils.hpp"
 #include "FBS/webRtcTransport.h"
@@ -12,46 +12,51 @@
 #ifdef MS_SCTP_STACK
 #include "RTC/SCTP/packet/Packet.hpp"
 #endif
-#include <cmath> // std::pow()
-#include <cstdint>
-#include <cstddef>
-#include <cstring>
-#include <string>
-#include <sstream>
-#include <iomanip>
 #include <arpa/inet.h> // ntohs, ntohl
+#include <cmath>       // std::pow()
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <iomanip>
+#include <sstream>
+#include <string>
 
 // 추가: rtp 페이로드 분석
 static constexpr uint8_t MAGIC_BE[4] = { 0x4c, 0x41, 0x54, 0x4e }; // "LATN"
 static constexpr uint8_t MAGIC_LE[4] = { 0x4e, 0x54, 0x41, 0x4c }; // "NTAL" (JS little-endian로 쓴 경우)
-static constexpr size_t  LAT_HEADER_LEN = 32;
-
+static constexpr size_t LAT_HEADER_LEN = 32;
 
 static inline uint16_t ReadBE16(const uint8_t* p)
 {
-  uint16_t v;
-  std::memcpy(&v, p, sizeof(v));
-  return ntohs(v);
+	uint16_t v;
+	std::memcpy(&v, p, sizeof(v));
+	return ntohs(v);
 }
 
 static inline uint32_t ReadBE32(const uint8_t* p)
 {
-  uint32_t v;
-  std::memcpy(&v, p, sizeof(v));
-  return ntohl(v);
+	uint32_t v;
+	std::memcpy(&v, p, sizeof(v));
+	return ntohl(v);
 }
 
 static std::string HexDump(const uint8_t* p, size_t n, size_t maxBytes = 64)
 {
-  std::ostringstream oss;
-  const size_t m = (n < maxBytes) ? n : maxBytes;
-  for (size_t i = 0; i < m; ++i)
-  {
-    if (i) oss << ' ';
-    oss << std::hex << std::setw(2) << std::setfill('0') << (int)p[i];
-  }
-  if (n > maxBytes) oss << " ...";
-  return oss.str();
+	std::ostringstream oss;
+	const size_t m = (n < maxBytes) ? n : maxBytes;
+	for (size_t i = 0; i < m; ++i)
+	{
+		if (i)
+		{
+			oss << ' ';
+		}
+		oss << std::hex << std::setw(2) << std::setfill('0') << (int)p[i];
+	}
+	if (n > maxBytes)
+	{
+		oss << " ...";
+	}
+	return oss.str();
 }
 
 /**
@@ -84,15 +89,15 @@ static void ParseSctpData(const uint8_t* data, size_t len)
 	//   MS_ERROR_STD("[SCTPDBG] common hdr srcPort=%u dstPort=%u vtag=%u csum=%u",
 	//                srcPort, dstPort, vtag, csum);
 
-	size_t off = 12;
+	size_t off     = 12;
 	int chunkIndex = 0;
 
 	// 최소 chunk header(4B)
 	while (off + 4 <= len)
 	{
-		const uint8_t  chunkType  = data[off + 0];
-		const uint8_t  chunkFlags = data[off + 1];
-		const uint16_t chunkLen   = ReadBE16(data + off + 2);
+		const uint8_t chunkType  = data[off + 0];
+		const uint8_t chunkFlags = data[off + 1];
+		const uint16_t chunkLen  = ReadBE16(data + off + 2);
 
 		// MS_ERROR_STD("[SCTPDBG] chunk#%d off=%zu type=%u flags=0x%02x chunkLen=%u (remain=%zu)",
 		//              chunkIndex, off, chunkType, chunkFlags, chunkLen, (len - off));
@@ -105,7 +110,8 @@ static void ParseSctpData(const uint8_t* data, size_t len)
 
 		if (off + chunkLen > len)
 		{
-			MS_ERROR_STD("[SCTPDBG] off+chunkLen(%zu) > len(%zu) -> break (truncated?)", off + chunkLen, len);
+			MS_ERROR_STD(
+			  "[SCTPDBG] off+chunkLen(%zu) > len(%zu) -> break (truncated?)", off + chunkLen, len);
 			MS_ERROR_STD("[SCTPDBG] chunk header bytes: %s", HexDump(data + off, (len - off)).c_str());
 			break;
 		}
@@ -115,45 +121,46 @@ static void ParseSctpData(const uint8_t* data, size_t len)
 		// DATA chunk type=0
 		if (chunkType == 0)
 		{
-		//   MS_ERROR_STD("[SCTPDBG] chunk#%d is DATA", chunkIndex);
+			//   MS_ERROR_STD("[SCTPDBG] chunk#%d is DATA", chunkIndex);
 
-		if (chunkLen < 16)
-		{
-			MS_ERROR_STD("[SCTPDBG] DATA chunkLen < 16 (%u) -> skip (no full DATA header)", chunkLen);
-		}
-		else
-		{
-			const uint32_t tsn  = ReadBE32(chunk + 4);
-			const uint16_t sid  = ReadBE16(chunk + 8);
-			const uint16_t ssn  = ReadBE16(chunk + 10);
-			const uint32_t ppid = ReadBE32(chunk + 12);
-
-			const uint8_t* user = chunk + 16;
-			const size_t   ulen = chunkLen - 16;
-
-			// MS_ERROR_STD("[SCTPDBG] DATA tsn=%u sid=%u ssn=%u ppid=%u ulen=%zu",
-			//              tsn, sid, ssn, ppid, ulen);
-
-			// PPID 참고: 50(DCEP), 51(String), 53(Binary), 56/57(Empty) 등
-			if (ppid == 51 || ppid == 56)
+			if (chunkLen < 16)
 			{
-				std::string text(reinterpret_cast<const char*>(user), ulen);
-				// MS_ERROR_STD("[SCTPDBG] TEXT='%s'", text.c_str());
+				MS_ERROR_STD("[SCTPDBG] DATA chunkLen < 16 (%u) -> skip (no full DATA header)", chunkLen);
 			}
 			else
 			{
-				MS_ERROR_STD("[SCTPDBG] BIN hexdump=%s", HexDump(user, ulen).c_str());
+				const uint32_t tsn  = ReadBE32(chunk + 4);
+				const uint16_t sid  = ReadBE16(chunk + 8);
+				const uint16_t ssn  = ReadBE16(chunk + 10);
+				const uint32_t ppid = ReadBE32(chunk + 12);
+
+				const uint8_t* user = chunk + 16;
+				const size_t ulen   = chunkLen - 16;
+
+				// MS_ERROR_STD("[SCTPDBG] DATA tsn=%u sid=%u ssn=%u ppid=%u ulen=%zu",
+				//              tsn, sid, ssn, ppid, ulen);
+
+				// PPID 참고: 50(DCEP), 51(String), 53(Binary), 56/57(Empty) 등
+				if (ppid == 51 || ppid == 56)
+				{
+					std::string text(reinterpret_cast<const char*>(user), ulen);
+					// MS_ERROR_STD("[SCTPDBG] TEXT='%s'", text.c_str());
+				}
+				else
+				{
+					MS_ERROR_STD("[SCTPDBG] BIN hexdump=%s", HexDump(user, ulen).c_str());
+				}
 			}
-		}
 		}
 		else
 		{
-		// DATA가 아닌 chunk (3=SACK, 1=INIT, 2=INIT-ACK, 10=COOKIE-ECHO, 11=COOKIE-ACK, 4=HEARTBEAT...)
-		//MS_ERROR_STD("[SCTPDBG] chunk#%d is NON-DATA type=%u (likely control chunk)", chunkIndex, chunkType);
+			// DATA가 아닌 chunk (3=SACK, 1=INIT, 2=INIT-ACK, 10=COOKIE-ECHO, 11=COOKIE-ACK,
+			// 4=HEARTBEAT...) MS_ERROR_STD("[SCTPDBG] chunk#%d is NON-DATA type=%u (likely control
+			// chunk)", chunkIndex, chunkType);
 		}
 
 		// 4바이트 정렬(패딩 포함)
-		size_t adv = chunkLen;
+		size_t adv       = chunkLen;
 		const size_t pad = (4 - (adv % 4)) % 4;
 		adv += pad;
 
@@ -167,86 +174,92 @@ static void ParseSctpData(const uint8_t* data, size_t len)
 	// MS_ERROR_STD("[SCTPDBG] exit. parsedChunks=%d finalOff=%zu len=%zu", chunkIndex, off, len);
 }
 
-
 static inline double NowEpochMs()
 {
-    using namespace std::chrono;
-    return duration<double, std::milli>(system_clock::now().time_since_epoch()).count();
+	using namespace std::chrono;
+	return duration<double, std::milli>(system_clock::now().time_since_epoch()).count();
 }
 
 static inline uint32_t ReadU32LE(const uint8_t* p)
 {
-    return (uint32_t)p[0]        |
-           ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16)|
-           ((uint32_t)p[3] << 24);
+	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
 static inline double ReadF64LE(const uint8_t* p)
 {
-    // prefix를 little-endian uint64로 조립
-    uint64_t u =
-        (uint64_t)p[0]        |
-        ((uint64_t)p[1] << 8) |
-        ((uint64_t)p[2] << 16)|
-        ((uint64_t)p[3] << 24)|
-        ((uint64_t)p[4] << 32)|
-        ((uint64_t)p[5] << 40)|
-        ((uint64_t)p[6] << 48)|
-        ((uint64_t)p[7] << 56);
+	// prefix를 little-endian uint64로 조립
+	uint64_t u = (uint64_t)p[0] | ((uint64_t)p[1] << 8) | ((uint64_t)p[2] << 16) |
+	             ((uint64_t)p[3] << 24) | ((uint64_t)p[4] << 32) | ((uint64_t)p[5] << 40) |
+	             ((uint64_t)p[6] << 48) | ((uint64_t)p[7] << 56);
 
-    double d;
-    static_assert(sizeof(double) == sizeof(uint64_t));
-    std::memcpy(&d, &u, sizeof(double));
-    return d;
+	double d;
+	static_assert(sizeof(double) == sizeof(uint64_t));
+	std::memcpy(&d, &u, sizeof(double));
+	return d;
 }
 
 // 이 함수에서 SFUrecvMs를 페이로드에 write 해야 함
-bool ParseFramePrefixforReceive(uint8_t* payload, 
-					  size_t payloadLen, 
-					  RTC::RtpPacket::RtpPrefix* pfx)
-{	
-	if (!pfx) return false;
-    if (!payload || payloadLen < LAT_HEADER_LEN) return false;
+bool ParseFramePrefixforReceive(uint8_t* payload, size_t payloadLen, RTC::RtpPacket::RtpPrefix* pfx)
+{
+	if (!pfx)
+	{
+		return false;
+	}
+	if (!payload || payloadLen < LAT_HEADER_LEN)
+	{
+		return false;
+	}
 
-    // STAMP 확인
-	if (std::memcmp(payload, MAGIC_LE, 4) != 0) return false;
+	// STAMP 확인
+	if (std::memcmp(payload, MAGIC_LE, 4) != 0)
+	{
+		return false;
+	}
 	const uint32_t stamp = ReadU32LE(payload);
 
 	// 수신 시점 측정
-	const double SFUrecvMs =  NowEpochMs();
-	
+	const double SFUrecvMs = NowEpochMs();
+
 	// FrameID 읽기
 	const uint32_t frameID = ReadU32LE(payload + 4);
 
-    // sendTsMs 읽기 (offset 8)
-    const double sendTsMs = ReadF64LE(payload + 8);
-	if (!std::isfinite(sendTsMs)) return false;
+	// sendTsMs 읽기 (offset 8)
+	const double sendTsMs = ReadF64LE(payload + 8);
+	if (!std::isfinite(sendTsMs))
+	{
+		return false;
+	}
 
 	// 여기서 prefix에 기록 (offset 16)
-    WriteF64LE(payload + 16, SFUrecvMs);
+	WriteF64LE(payload + 16, SFUrecvMs);
 
+	// p2s latency 측정
+	const double p2s = SFUrecvMs - sendTsMs;
 
-	//p2s latency 측정
- 	const double p2s = SFUrecvMs - sendTsMs;
-
-	pfx->Stamp = stamp;
-	pfx->FrameID = frameID;
+	pfx->Stamp     = stamp;
+	pfx->FrameID   = frameID;
 	pfx->sendTsMs  = sendTsMs;
 	pfx->SFUrecvMs = SFUrecvMs;
-	pfx->p2s = p2s;
-    return true;
+	pfx->p2s       = p2s;
+	return true;
 }
 
-bool ParseFramePrefixforSend(uint8_t* payload, 
-					         size_t payloadLen, 
-                             RTC::RtpPacket::RtpPrefix* pfx)
-{	
-	if (!pfx) return false;
-    if (!payload || payloadLen < LAT_HEADER_LEN) return false;
+bool ParseFramePrefixforSend(uint8_t* payload, size_t payloadLen, RTC::RtpPacket::RtpPrefix* pfx)
+{
+	if (!pfx)
+	{
+		return false;
+	}
+	if (!payload || payloadLen < LAT_HEADER_LEN)
+	{
+		return false;
+	}
 
-    // STAMP 확인
-    if (std::memcmp(payload, MAGIC_LE, 4) != 0) return false;
+	// STAMP 확인
+	if (std::memcmp(payload, MAGIC_LE, 4) != 0)
+	{
+		return false;
+	}
 
 	// 송신 시점 측정
 	const double SFUsendMs = NowEpochMs();
@@ -256,27 +269,35 @@ bool ParseFramePrefixforSend(uint8_t* payload,
 
 	const double testSFUsendMs = ReadF64LE(payload + 24);
 	// MS_ERROR_STD("[test]: SFUsendMs=%.3f", testSFUsendMs);
-    return true;
+	return true;
 }
 
 bool HasMagicPrefix(const uint8_t* payload, size_t payloadLen)
 {
-    if (!payload) {
-		//MS_ERROR_STD("no payload data");
+	if (!payload)
+	{
+		// MS_ERROR_STD("no payload data");
 		return false;
-	} 
-	else if (payloadLen < 4) {
-		//MS_ERROR_STD("payload length < 4");
+	}
+	else if (payloadLen < 4)
+	{
+		// MS_ERROR_STD("payload length < 4");
 		return false;
 	}
 
-    // JS에서 big-endian으로 썼다면:
-    if (std::memcmp(payload, MAGIC_BE, 4) == 0) return true;
-	else if (std::memcmp(payload, MAGIC_LE, 4) == 0) return true;
-    // JS에서 little-endian(true)로 썼다면:
-    // if (std::memcmp(payload, MAGIC_LE, 4) == 0) return true;
-	//MS_ERROR_STD("No Stamp");
-    return false;
+	// JS에서 big-endian으로 썼다면:
+	if (std::memcmp(payload, MAGIC_BE, 4) == 0)
+	{
+		return true;
+	}
+	else if (std::memcmp(payload, MAGIC_LE, 4) == 0)
+	{
+		return true;
+	}
+	// JS에서 little-endian(true)로 썼다면:
+	// if (std::memcmp(payload, MAGIC_LE, 4) == 0) return true;
+	// MS_ERROR_STD("No Stamp");
+	return false;
 }
 // 추가: rtp 페이로드 분석
 
@@ -888,8 +909,8 @@ namespace RTC
 	  RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
-		//MS_ERROR_STD("debug");
-		// Increase receive transmission.
+		// MS_ERROR_STD("debug");
+		//  Increase receive transmission.
 		RTC::Transport::DataReceived(len);
 
 		// Check if it's RTCP.
@@ -1020,15 +1041,15 @@ namespace RTC
 	{
 		MS_TRACE();
 		int a;
-		//MS_ERROR_STD();
-		if(this->tccClient)
+		// MS_ERROR_STD();
+		if (this->tccClient)
 		{
 			a = 101;
 		}
-		else 
+		else
 		{
 			a = 141;
-		}	
+		}
 		if (!IsConnected())
 		{
 			if (cb)
@@ -1054,14 +1075,15 @@ namespace RTC
 			return;
 		}
 
-		if(ParseFramePrefixforSend(packet->GetPayload(), packet->GetPayloadLength(), &packet->rtpPrefix)) {
+		if (ParseFramePrefixforSend(packet->GetPayload(), packet->GetPayloadLength(), &packet->rtpPrefix))
+		{
 			const double SFUlatency = packet->rtpPrefix.SFUsendMs - packet->rtpPrefix.SFUrecvMs;
-			// MS_ERROR_STD("[STAMP] FrameID=%d, p2s= %.3f, SFUlatency=%.3f, a=%d", 
+			// MS_ERROR_STD("[STAMP] FrameID=%d, p2s= %.3f, SFUlatency=%.3f, a=%d",
 			// 	packet->rtpPrefix.FrameID, packet->rtpPrefix.p2s, SFUlatency, a);
-			
-			// MS_ERROR_STD("[STAMP] FrameID=%d, sendTsMs= %.3f, SFUsendMs=%.3f, SFUrecvMs=%.3f, SFUlatency=%.3f", 
-			// 	packet->rtpPrefix.FrameID, packet->rtpPrefix.sendTsMs, packet->rtpPrefix.SFUsendMs, packet->rtpPrefix.SFUrecvMs, SFUlatency);
-			
+
+			// MS_ERROR_STD("[STAMP] FrameID=%d, sendTsMs= %.3f, SFUsendMs=%.3f, SFUrecvMs=%.3f,
+			// SFUlatency=%.3f", 	packet->rtpPrefix.FrameID, packet->rtpPrefix.sendTsMs,
+			// packet->rtpPrefix.SFUsendMs, packet->rtpPrefix.SFUrecvMs, SFUlatency);
 		}
 
 		const uint8_t* data = packet->GetData();
@@ -1077,22 +1099,23 @@ namespace RTC
 
 			return;
 		}
-		
+
 		/** logger **/
 		// auto recvUs = packet->GetReceivedAtUs();
 		// auto nowUs = DepLibUV::GetTimeUsInt64();
 		// auto delayUs = (recvUs != 0 ? (nowUs - recvUs) : 0);
 
 		// 추가: RTP 패킷의 각종 정보를 로깅하는 코드
-		// MS_ERROR_STD("[SFU_DELAY] ssrc=%" PRIu32 " seq=%" PRIu16 " timestamp=%" PRIu32 " packetsize=%zu payloadlength=%zu recvUs=%" PRIu64 " nowUs=%" PRIu64 " deltaUs=%" PRId64 "\n",
-    	// 	packet->GetSsrc(),
-    	// 	packet->GetSequenceNumber(),
+		// MS_ERROR_STD("[SFU_DELAY] ssrc=%" PRIu32 " seq=%" PRIu16 " timestamp=%" PRIu32 "
+		// packetsize=%zu payloadlength=%zu recvUs=%" PRIu64 " nowUs=%" PRIu64 " deltaUs=%" PRId64 "\n",
+		// 	packet->GetSsrc(),
+		// 	packet->GetSequenceNumber(),
 		// 	packet->GetTimestamp(),
 		// 	packet->GetSize(),
 		// 	packet->GetPayloadLength(),
-    	// 	recvUs,
-    	// 	nowUs,
-    	// 	delayUs);
+		// 	recvUs,
+		// 	nowUs,
+		// 	delayUs);
 		this->iceServer->GetSelectedTuple()->Send(data, len, cb);
 
 		// Increase send transmission.
@@ -1228,8 +1251,8 @@ namespace RTC
 	  RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
-		//MS_ERROR_STD("debug");
-		// Increase receive transmission.
+		// MS_ERROR_STD("debug");
+		//  Increase receive transmission.
 		RTC::Transport::DataReceived(len);
 
 		// Check if it's STUN.
@@ -1314,8 +1337,8 @@ namespace RTC
 	  RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
-		//MS_ERROR_STD("debug");
-		// Ensure DTLS is connected.
+		// MS_ERROR_STD("debug");
+		//   Ensure DTLS is connected.
 		if (this->dtlsTransport->GetState() != RTC::DtlsTransport::DtlsState::CONNECTED)
 		{
 			MS_DEBUG_2TAGS(dtls, rtp, "ignoring RTP packet while DTLS not connected");
@@ -1374,8 +1397,28 @@ namespace RTC
 
 		// 추가: SFU RTP 패킷 페이로드 확인 및 prefix를 찾는 코드
 		// 패킷이 복호화되고 나서부터 데이터를 읽을 수 있으므로 그 이후 진행
-		if(ParseFramePrefixforReceive(packet->GetPayload(), packet->GetPayloadLength(), &packet->rtpPrefix)) {
-		}
+		// if(ParseFramePrefixforReceive(packet->GetPayload(), packet->GetPayloadLength(),
+		// &packet->rtpPrefix)) {
+		// }
+
+		// ===============================
+		// 임시 확인용
+		// ===============================
+		static uint64_t debugPacketCount = 0;
+
+		debugPacketCount++;
+
+		// if (debugPacketCount % 100 == 0)
+		// {
+		// 	MS_ERROR_STD(
+		// 	  "[ORIGIN-RTP-RECV] "
+		// 	  "count=%" PRIu64 " ssrc=%" PRIu32 " ts=%" PRIu32 " seq=%" PRIu16 " payloadLen=%zu",
+		// 	  debugPacketCount,
+		// 	  packet->GetSsrc(),
+		// 	  packet->GetTimestamp(),
+		// 	  packet->GetSequenceNumber(),
+		// 	  packet->GetPayloadLength());
+		// }
 
 		// Trick for clients performing aggressive ICE regardless we are ICE-Lite.
 		this->iceServer->MayForceSelectedTuple(tuple);
@@ -1429,7 +1472,7 @@ namespace RTC
 			MS_WARN_TAG(rtcp, "received data is not a valid RTCP compound or single packet");
 
 			return;
-			
+
 			// MS_ERROR_STD("RTCP type: %u",
 			// 	static_cast<unsigned>(static_cast<uint8_t>(packet->GetType())));
 		}
@@ -1442,7 +1485,7 @@ namespace RTC
 	  RTC::UdpSocket* socket, const uint8_t* data, size_t len, const struct sockaddr* remoteAddr)
 	{
 		MS_TRACE();
-		//MS_ERROR_STD("debug");
+		// MS_ERROR_STD("debug");
 		RTC::TransportTuple tuple(socket, remoteAddr);
 
 		OnPacketReceived(&tuple, data, len);
@@ -1775,7 +1818,7 @@ namespace RTC
 // TODO: For testing purposes. Must be removed.
 #ifdef MS_SCTP_STACK
 		MS_DUMP("<<< receiving SCTP packet...");
-		
+
 		// 1) SCTP DATA chunk에서 "hello" 같은 payload 확인(디버그)
 
 		auto* packet = RTC::SCTP::Packet::Parse(data, len);
@@ -1791,7 +1834,7 @@ namespace RTC
 
 		delete packet;
 #endif
-		//SctpData에서 필요한 데이터 추출 (latency). 이외에도 컨트롤 메세지나 chat 데이터가 올 수 있음
+		// SctpData에서 필요한 데이터 추출 (latency). 이외에도 컨트롤 메세지나 chat 데이터가 올 수 있음
 		ParseSctpData(data, len);
 		// Pass it to the parent transport.
 		RTC::Transport::ReceiveSctpData(data, len);

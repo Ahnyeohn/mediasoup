@@ -61,8 +61,9 @@ namespace RTC
 			}
 		}
 
-		if (auto initialAvailableOutgoingBitrate = options->initialAvailableOutgoingBitrate();
-		    initialAvailableOutgoingBitrate.has_value())
+		if (
+		  auto initialAvailableOutgoingBitrate = options->initialAvailableOutgoingBitrate();
+		  initialAvailableOutgoingBitrate.has_value())
 		{
 			this->initialAvailableOutgoingBitrate = initialAvailableOutgoingBitrate.value();
 		}
@@ -1558,7 +1559,7 @@ namespace RTC
 	void Transport::ReceiveRtpPacket(RTC::RtpPacket* packet)
 	{
 		MS_TRACE();
-		
+
 #ifdef MS_RTC_LOGGER_RTP
 		packet->logger.recvTransportId = this->id;
 #endif
@@ -2452,14 +2453,15 @@ namespace RTC
 	inline void Transport::OnProducerRtpPacketReceived(RTC::Producer* producer, RTC::RtpPacket* packet)
 	{
 		MS_TRACE();
-		//MS_ERROR_STD();
+		// MS_ERROR_STD();
 		this->listener->OnTransportProducerRtpPacketReceived(this, producer, packet);
+
 	}
 
 	inline void Transport::OnProducerSendRtcpPacket(RTC::Producer* /*producer*/, RTC::RTCP::Packet* packet)
 	{
 		MS_TRACE();
-		
+
 		SendRtcpPacket(packet);
 	}
 
@@ -2475,7 +2477,7 @@ namespace RTC
 	inline void Transport::OnConsumerSendRtpPacket(RTC::Consumer* consumer, RTC::RtpPacket* packet)
 	{
 		MS_TRACE();
-		//MS_ERROR_STD();
+		// MS_ERROR_STD();
 
 #ifdef MS_RTC_LOGGER_RTP
 		packet->logger.sendTransportId = this->id;
@@ -2493,8 +2495,8 @@ namespace RTC
 			packet->UpdateTransportWideCc01(this->transportWideCcSeq + 1)
 		)
 		// clang-format on
-		{	
-			//MS_ERROR_STD("no");
+		{
+			// MS_ERROR_STD("no");
 			this->transportWideCcSeq++;
 
 			webrtc::RtpPacketSendInfo packetInfo;
@@ -2566,8 +2568,8 @@ namespace RTC
 #endif
 		}
 		else
-		{	
-			//MS_ERROR_STD("yes");
+		{
+			// MS_ERROR_STD("yes");
 			SendRtpPacket(consumer, packet);
 		}
 
@@ -2978,8 +2980,8 @@ namespace RTC
 	  const webrtc::PacedPacketInfo& pacingInfo)
 	{
 		MS_TRACE();
-		//MS_ERROR_STD();
-		// Update abs-send-time if present.
+		// MS_ERROR_STD();
+		//  Update abs-send-time if present.
 		packet->UpdateAbsSendTime(DepLibUV::GetTimeMs());
 
 		// Update transport wide sequence number if present.

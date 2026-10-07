@@ -10,6 +10,9 @@ namespace RTC
 	namespace Codecs
 	{
 		/* Class methods. */
+		static constexpr uint8_t FRAME_META_MAGIC_LE[4]{ 0x31, 0x4D, 0x53, 0x46 };
+
+		static constexpr size_t FRAME_META_HEADER_LEN{ 12u };
 
 		VP8::PayloadDescriptor* VP8::Parse(const uint8_t* data, size_t len)
 		{
@@ -112,17 +115,56 @@ namespace RTC
 				payloadDescriptor->keyIndex   = byte & 0x1F;
 			}
 
-			// clang-format off
-			if (
-				// NOLINTNEXTLINE (bugprone-inc-dec-in-conditions)
-				(len >= ++offset + 1) &&
-				payloadDescriptor->start &&
-				payloadDescriptor->partitionIndex == 0 &&
-				(!(data[offset] & 0x01)) // Inverse Keyframe bit.
-			)
-			// clang-format on
+			// // clang-format off
+			// if (
+			// 	// NOLINTNEXTLINE (bugprone-inc-dec-in-conditions)
+			// 	(len >= ++offset + 1) &&
+			// 	payloadDescriptor->start &&
+			// 	payloadDescriptor->partitionIndex == 0 &&
+			// 	(!(data[offset] & 0x01)) // Inverse Keyframe bit.
+			// )
+			// // clang-format on
+			// {
+			// 	payloadDescriptor->isKeyFrame = true;
+			// }
+
+			// Move from the last VP8 payload descriptor byte
+			// to the first byte of the VP8 encoded payload.
+			++offset;
+
+			// Keyframe information exists in the first partition,
+			// first packet of the VP8 frame.
+			if (len >= offset + 1 && payloadDescriptor->start && payloadDescriptor->partitionIndex == 0)
 			{
-				payloadDescriptor->isKeyFrame = true;
+				size_t vp8PayloadOffset = offset;
+
+				// yeon:
+				// Insertable Streams metadata layout:
+				//
+				// [VP8 Payload Descriptor]
+				// [12-byte FRAME_META]
+				// [real VP8 encoded payload]
+				//
+				// Do NOT remove the metadata here.
+				// Just skip it while inspecting the VP8 frame type.
+				if (
+				  len >= vp8PayloadOffset + FRAME_META_HEADER_LEN &&
+				  std::memcmp(data + vp8PayloadOffset, FRAME_META_MAGIC_LE, sizeof(FRAME_META_MAGIC_LE)) == 0)
+				{
+					vp8PayloadOffset += FRAME_META_HEADER_LEN;
+				}
+
+				// There must still be at least one byte of actual VP8 payload.
+				if (len >= vp8PayloadOffset + 1)
+				{
+					// VP8 uncompressed data chunk:
+					// bit 0 = 0 -> key frame
+					// bit 0 = 1 -> inter frame
+					if (!(data[vp8PayloadOffset] & 0x01))
+					{
+						payloadDescriptor->isKeyFrame = true;
+					}
+				}
 			}
 
 			return payloadDescriptor.release();

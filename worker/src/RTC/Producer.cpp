@@ -573,7 +573,8 @@ namespace RTC
 	Producer::ReceiveRtpPacketResult Producer::ReceiveRtpPacket(RTC::RtpPacket* packet)
 	{
 		MS_TRACE();
-		//MS_ERROR_STD("debug");
+
+		// MS_ERROR_STD("debug");
 #ifdef MS_RTC_LOGGER_RTP
 		packet->logger.producerId = this->id;
 #endif
@@ -690,6 +691,7 @@ namespace RTC
 		EmitTraceEventRtpAndKeyFrameTypes(packet, isRtx);
 
 		// Mangle the packet before providing the listener with it.
+
 		if (!MangleRtpPacket(packet, rtpStream))
 		{
 			return ReceiveRtpPacketResult::DISCARDED;
@@ -1554,7 +1556,7 @@ namespace RTC
 		{
 			auto rtpPacketDump = packet->FillBuffer(this->shared->channelNotifier->GetBufferBuilder());
 			auto traceInfo     = FBS::Producer::CreateKeyFrameTraceInfo(
-        this->shared->channelNotifier->GetBufferBuilder(), rtpPacketDump, isRtx);
+			  this->shared->channelNotifier->GetBufferBuilder(), rtpPacketDump, isRtx);
 
 			auto notification = FBS::Producer::CreateTraceNotification(
 			  this->shared->channelNotifier->GetBufferBuilder(),
@@ -1570,7 +1572,7 @@ namespace RTC
 		{
 			auto rtpPacketDump = packet->FillBuffer(this->shared->channelNotifier->GetBufferBuilder());
 			auto traceInfo     = FBS::Producer::CreateRtpTraceInfo(
-        this->shared->channelNotifier->GetBufferBuilder(), rtpPacketDump, isRtx);
+			  this->shared->channelNotifier->GetBufferBuilder(), rtpPacketDump, isRtx);
 
 			auto notification = FBS::Producer::CreateTraceNotification(
 			  this->shared->channelNotifier->GetBufferBuilder(),
