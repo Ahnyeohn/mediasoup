@@ -653,7 +653,12 @@ namespace RTC
 	  RTC::Transport* /*transport*/, RTC::Producer* producer, RTC::RtpPacket* packet)
 	{
 		MS_TRACE();
-		// MS_ERROR_STD();
+
+		// if (producer->GetKind() == RTC::Media::Kind::VIDEO)
+		// {
+		// 	MS_WARN_TAG(rtp, "[PIPE-TRACE-P3] Router::OnTransportProducerRtpPacketReceived()");
+		// }
+		//MS_ERROR_STD("debug3");
 
 #ifdef MS_RTC_LOGGER_RTP
 		packet->logger.routerId = this->id;

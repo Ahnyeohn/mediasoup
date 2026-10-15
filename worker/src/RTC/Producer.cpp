@@ -282,7 +282,7 @@ namespace RTC
 			    builder,
 			    encodingMapping.rid.c_str(),
 			    encodingMapping.ssrc != 0u ? flatbuffers::Optional<uint32_t>(encodingMapping.ssrc)
-			                               : flatbuffers::nullopt,
+					                           : flatbuffers::nullopt,
 			    nullptr, /* capability mode. NOTE: Present in NODE*/
 			    encodingMapping.mappedSsrc));
 		}
@@ -331,7 +331,7 @@ namespace RTC
 		  builder,
 		  this->id.c_str(),
 		  this->kind == RTC::Media::Kind::AUDIO ? FBS::RtpParameters::MediaKind::AUDIO
-		                                        : FBS::RtpParameters::MediaKind::VIDEO,
+			                                      : FBS::RtpParameters::MediaKind::VIDEO,
 		  RTC::RtpParameters::TypeToFbs(this->type),
 		  rtpParameters,
 		  rtpMapping,
@@ -574,7 +574,10 @@ namespace RTC
 	{
 		MS_TRACE();
 
-		// MS_ERROR_STD("debug");
+		// if (this->kind == RTC::Media::Kind::VIDEO)
+		// {
+		// 	MS_WARN_TAG(rtp, "[PIPE-TRACE-P1] Producer::ReceiveRtpPacket()");
+		// }
 #ifdef MS_RTC_LOGGER_RTP
 		packet->logger.producerId = this->id;
 #endif
@@ -696,6 +699,10 @@ namespace RTC
 		{
 			return ReceiveRtpPacketResult::DISCARDED;
 		}
+		// if (this->kind == RTC::Media::Kind::VIDEO)
+		// {
+		// 	MS_WARN_TAG(rtp, "[PIPE-TRACE-P2] after MangleRtpPacket()");
+		// }
 
 		// Post-process the packet.
 		PostProcessRtpPacket(packet);

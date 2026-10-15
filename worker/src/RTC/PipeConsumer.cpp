@@ -268,7 +268,10 @@ namespace RTC
 	void PipeConsumer::SendRtpPacket(RTC::RtpPacket* packet, RTC::SharedRtpPacket& sharedPacket)
 	{
 		MS_TRACE();
-
+		// if (this->kind == RTC::Media::Kind::VIDEO)
+		// {
+		// 	MS_WARN_TAG(rtp, "[PIPE-TRACE-P4] PipeConsumer::SendRtpPacket()");
+		// }
 #ifdef MS_RTC_LOGGER_RTP
 		packet->logger.consumerId = this->id;
 #endif
