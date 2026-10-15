@@ -1,7 +1,5 @@
 #pragma once
 
-
-
 #include <array>
 
 #include <cstddef>
@@ -16,678 +14,552 @@
 
 #include <vector>
 
-
-
 namespace RTC
 
 {
 
-    namespace KnnExperiment
+	namespace KnnExperiment
 
-    {
+	{
 
-        // false = 기존 kNN, true = 동일 action sample만 neighbor 후보.
+		// false = 기존 kNN, true = 동일 action sample만 neighbor 후보.
 
-        static constexpr bool ActionConditionedPredictionEnabled{ true };
+		static constexpr bool ActionConditionedPredictionEnabled{ true };
 
+		// false = 기존 cold-start, true = 30-action balanced cold-start + pause scenario.
 
+		static constexpr bool ColdStartActionCoverageEnabled{ true };
 
-        // false = 기존 cold-start, true = 30-action balanced cold-start + pause scenario.
+		static constexpr bool PauseStateEnabled{ true };
 
-        static constexpr bool ColdStartActionCoverageEnabled{ true };
+		enum class NetworkExperimentOption : uint8_t
 
+		{
+			A = 0, // NORMAL, 2MBIT
 
+			B, // NORMAL, 4MBIT
 
-        static constexpr bool PauseStateEnabled{ true };
+			C, // NORMAL, 2MBIT, 4MBIT
 
+			D, // NORMAL, 2MBIT, 4MBIT, 6MBIT
 
+			E, // NORMAL, LOSS_2PCT
 
-        enum class NetworkExperimentOption : uint8_t
+			F, // NORMAL, LOSS_5PCT
 
-        {
+			G, // NORMAL, LOSS_15PCT
 
-            A = 0, // NORMAL, 2MBIT
+			H // NORMAL, 2MBIT, 4MBIT, LOSS_5PCT
+		};
 
-            B,     // NORMAL, 4MBIT
+	}
 
-            C,     // NORMAL, 2MBIT, 4MBIT
+	// ============================================================
 
-            D,     // NORMAL, 2MBIT, 4MBIT, 6MBIT
+	// kNN input feature
 
-            E,     // NORMAL, LOSS_2PCT
+	// X(A) =
 
-            F,     // NORMAL, LOSS_5PCT
+	// [ RTT, Loss, BW, Congestion, FrameSize(A), PredictedPacingDelay(A) ]
 
-            G,     // NORMAL, LOSS_15PCT
+	// ============================================================
 
-            H      // NORMAL, 2MBIT, 4MBIT, LOSS_5PCT
+	struct SlackFeature
 
-        };
+	{
+		double rttMs{ 0.0 };
 
-    }
+		double lossRate{ 0.0 };
 
+		double availableBitrateBps{ 0.0 };
 
+		// Camel congestion detector의 raw congestion signal.
 
-    // ============================================================
+		// S(D, inflight) ~= ΔDelay / ΔInflight, unit: ms / KB.
 
-    // kNN input feature
+		double congestion{ 0.0 };
 
-    // X(A) =
+		// Layer + FEC action을 고려한 예상 frame size.
 
-    // [ RTT, Loss, BW, Congestion, FrameSize(A), PredictedPacingDelay(A) ]
+		double frameSizeBytes{ 0.0 };
 
-    // ============================================================
+		// 해당 action에서 예상되는 pacing delay. Pacing OFF이면 0.
 
-    struct SlackFeature
+		double pacingDelayMs{ 0.0 };
+	};
 
-    {
+	struct SlackActionIdentity
 
-        double rttMs{ 0.0 };
+	{
+		uint8_t spatialLayer{ 0u };
 
-        double lossRate{ 0.0 };
+		uint8_t fecProtectionFactor{ 0u };
 
-        double availableBitrateBps{ 0.0 };
+		bool pacingEnabled{ false };
+	};
 
+	enum class KnnColdStartPhase : uint8_t
 
+	{
+		NONE = 0,
 
-        // Camel congestion detector의 raw congestion signal.
+		COLLECT,
 
-        // S(D, inflight) ~= ΔDelay / ΔInflight, unit: ms / KB.
+		NETWORK_PAUSE,
 
-        double congestion{ 0.0 };
+		LAYER_PAUSE
+	};
 
+	enum class KnnColdStartNetworkProfile : uint8_t
 
+	{
+		NORMAL = 0,
 
-        // Layer + FEC action을 고려한 예상 frame size.
+		LIMIT_6MBIT,
 
-        double frameSizeBytes{ 0.0 };
+		LIMIT_2MBIT,
 
+		LIMIT_4MBIT,
 
+		// Legacy profile kept for backward-compatible logs / analysis.
+		LIMIT_8MBIT,
 
-        // 해당 action에서 예상되는 pacing delay. Pacing OFF이면 0.
+		LOSS_2PCT,
 
-        double pacingDelayMs{ 0.0 };
+		LOSS_5PCT,
 
-    };
+		LOSS_15PCT
+	};
 
+	// ============================================================
 
+	// KNN evaluation phase.
 
-    struct SlackActionIdentity
+	//
 
-    {
+	// Cold Start가 끝난 뒤 KNN 자체를 평가하기 위한 별도 phase.
 
-        uint8_t spatialLayer{ 0u };
+	// ============================================================
 
-        uint8_t fecProtectionFactor{ 0u };
+	enum class KnnEvaluationPhase : uint8_t
 
-        bool pacingEnabled{ false };
+	{
+		NONE = 0,
 
-    };
+		// Cold Start 마지막 network에서 NORMAL로 변경하면서 150 frame 대기.
 
+		START_NETWORK_PAUSE,
 
+		// NORMAL network에서 KNN 평가 1500 frames.
 
-    enum class KnnColdStartPhase : uint8_t
+		COLLECT_NORMAL,
 
-    {
+		// Network profile 전환 후 150 frame 대기.
 
-        NONE = 0,
+		MID_NETWORK_PAUSE,
 
-        COLLECT,
+		// 각 network profile에서 KNN 평가 1500 frames.
 
-        NETWORK_PAUSE,
+		COLLECT_6MBIT,
 
-        LAYER_PAUSE
+		COLLECT_2MBIT,
 
-    };
+		COLLECT_4MBIT,
 
+		// Legacy profile.
+		COLLECT_8MBIT,
 
+		COLLECT_LOSS_2PCT,
 
-    enum class KnnColdStartNetworkProfile : uint8_t
+		COLLECT_LOSS_5PCT,
 
-    {
+		COLLECT_LOSS_15PCT,
 
-        NORMAL = 0,
+		COMPLETE
+	};
 
-        LIMIT_6MBIT,
+	struct SlackActionDecision
 
-        LIMIT_2MBIT,
+	{
+		uint32_t logicalFrameId{ 0u };
 
-        LIMIT_4MBIT,
+		// 실제 kNN에 사용되는 6개 feature.
 
-        // Legacy profile kept for backward-compatible logs / analysis.
-        LIMIT_8MBIT,
+		SlackFeature feature;
 
-        LOSS_2PCT,
+		// 같은 FEC/Pacing action을 L0/L1/L2 각각에 적용했을 때의
 
-        LOSS_5PCT,
+		// decision-time feature. Training에서는 actual layer에 해당하는
 
-        LOSS_15PCT
+		// feature를 사용한다.
 
-    };
+		std::array<SlackFeature, 3> actionFeatureBySpatialLayer{};
 
+		std::array<bool, 3> hasActionFeatureBySpatialLayer{ false, false, false };
 
+		std::array<double, 3> predictedDecodeSlackBySpatialLayer{ 0.0, 0.0, 0.0 };
 
-    // ============================================================
+		std::array<bool, 3> hasPredictedDecodeSlackBySpatialLayer{ false, false, false };
 
-    // KNN evaluation phase.
+		std::array<double, 3> predictedDeadlineMissProbabilityBySpatialLayer{ 0.0, 0.0, 0.0 };
 
-    //
+		std::array<bool, 3> hasPredictedDeadlineMissProbabilityBySpatialLayer{ false, false, false };
 
-    // Cold Start가 끝난 뒤 KNN 자체를 평가하기 위한 별도 phase.
+		// Decision-time raw pacer diagnostics.
 
-    // ============================================================
+		double aceQueueBytes{ 0.0 };
 
-    enum class KnnEvaluationPhase : uint8_t
+		double pacingBacklogBytes{ 0.0 };
 
-    {
+		double pacingBucketSizeBytes{ 0.0 };
 
-        NONE = 0,
+		double tokenRateBytesPerMs{ 0.0 };
 
+		// kNN prediction for the selected action.
 
+		bool hasPredictedDecodeSlack{ false };
 
-        // Cold Start 마지막 network에서 NORMAL로 변경하면서 150 frame 대기.
+		double predictedDecodeSlackMs{ 0.0 };
 
-        START_NETWORK_PAUSE,
+		bool hasPredictedDeadlineMissProbability{ false };
 
+		double predictedDeadlineMissProbability{ 0.0 };
 
+		// Action identity / execution metadata.
 
-        // NORMAL network에서 KNN 평가 1500 frames.
+		uint8_t spatialLayer{ 0u };
 
-        COLLECT_NORMAL,
+		size_t fecIndex{ 0u };
 
+		double fecRedundancyRate{ 0.0 };
 
+		uint8_t fecProtectionFactor{ 0u };
 
-        // Network profile 전환 후 150 frame 대기.
+		bool pacingEnabled{ false };
 
-        MID_NETWORK_PAUSE,
+		// false: cold-start decision, true: kNN-selected decision.
 
+		bool modelSelected{ false };
 
+		// Balanced Cold Start에서만 true.
 
-        // 각 network profile에서 KNN 평가 1500 frames.
+		// true이면 WebRtcTransport가 legacy adaptive FEC / global ispacing 대신
 
-        COLLECT_6MBIT,
+		// 이 decision의 FEC/Pacing을 현재 frame에 직접 적용한다.
 
-        COLLECT_2MBIT,
+		bool forceRuntimeAction{ false };
 
-        COLLECT_4MBIT,
+		// Cold Start pause 및 KNN evaluation pause에서 true.
 
-        // Legacy profile.
-        COLLECT_8MBIT,
+		// prediction/action/FrameRecord/CSV는 모두 정상 수행하지만
 
-        COLLECT_LOSS_2PCT,
+		// SlackPredictor historical training sample에는 추가하지 않는다.
 
-        COLLECT_LOSS_5PCT,
+		bool skipKnnTrainingSample{ false };
 
-        COLLECT_LOSS_15PCT,
+		// Cold Start experiment metadata.
 
+		KnnColdStartPhase coldStartPhase{ KnnColdStartPhase::NONE };
 
+		KnnColdStartNetworkProfile coldStartNetworkProfile{ KnnColdStartNetworkProfile::NORMAL };
 
-        COMPLETE
+		KnnColdStartNetworkProfile coldStartTargetNetworkProfile{ KnnColdStartNetworkProfile::NORMAL };
 
-    };
+		// pause frame이면 1~150, 그 외에는 0.
 
+		size_t coldStartPauseFrameIndex{ 0u };
 
+		// ============================================================
 
-    struct SlackActionDecision
+		// KNN evaluation metadata.
 
-    {
+		//
 
-        uint32_t logicalFrameId{ 0u };
+		// modelSelected == true인 KNN frame에서도
 
+		// 현재 evaluation phase를 FrameRecord/CSV에 보존.
 
+		// ============================================================
 
-        // 실제 kNN에 사용되는 6개 feature.
+		KnnEvaluationPhase knnEvaluationPhase{ KnnEvaluationPhase::NONE };
 
-        SlackFeature feature;
+		// 이 frame을 decision한 시점에서 현재 실험 network profile.
 
+		KnnColdStartNetworkProfile knnEvaluationNetworkProfile{ KnnColdStartNetworkProfile::NORMAL };
 
+		// pause 중 변경하려는 목표 network.
 
-        // 같은 FEC/Pacing action을 L0/L1/L2 각각에 적용했을 때의
+		// collect 상태에서는 current == target.
 
-        // decision-time feature. Training에서는 actual layer에 해당하는
+		KnnColdStartNetworkProfile knnEvaluationTargetNetworkProfile{ KnnColdStartNetworkProfile::NORMAL };
 
-        // feature를 사용한다.
+		// 각 evaluation phase 내부 frame 번호.
 
-        std::array<SlackFeature, 3> actionFeatureBySpatialLayer{};
+		//
 
-        std::array<bool, 3> hasActionFeatureBySpatialLayer{ false, false, false };
+		// pause   : 1 ~ 150
 
+		// collect : 1 ~ 1500
 
+		// 그 외   : 0
 
-        std::array<double, 3> predictedDecodeSlackBySpatialLayer{ 0.0, 0.0, 0.0 };
+		size_t knnEvaluationPhaseFrameIndex{ 0u };
 
-        std::array<bool, 3> hasPredictedDecodeSlackBySpatialLayer{ false, false, false };
+		// 현재 option의 마지막 network collection 1500번째 logical frame.
 
+		// Option별 마지막 profile은 A~H의 profile sequence에 의해 결정된다.
 
+		// WebRtcTransport가 이 frame의 feedback/CSV 기록을 끝낸 뒤
 
-        std::array<double, 3> predictedDeadlineMissProbabilityBySpatialLayer{ 0.0, 0.0, 0.0 };
+		// [KNN-EXPERIMENT-COMPLETE] 로그를 출력하는 데 사용.
 
-        std::array<bool, 3> hasPredictedDeadlineMissProbabilityBySpatialLayer{ false, false, false };
+		bool knnEvaluationTerminalFrame{ false };
+	};
 
+	struct SlackRuntimeActionState
 
+	{
+		bool fecEnabled{ false };
 
-        // Decision-time raw pacer diagnostics.
+		uint8_t fecProtectionFactor{ 0u };
 
-        double aceQueueBytes{ 0.0 };
+		bool pacingEnabled{ false };
+	};
 
-        double pacingBacklogBytes{ 0.0 };
+	enum class FrameOutcome : uint8_t
 
-        double pacingBucketSizeBytes{ 0.0 };
+	{
+		NORMAL = 0,
 
-        double tokenRateBytesPerMs{ 0.0 };
+		LATE,
 
+		PRE_DECODE_DROP
+	};
 
+	enum class KnnSampleOrigin : uint8_t
 
-        // kNN prediction for the selected action.
+	{
+		COLD_START = 0,
 
-        bool hasPredictedDecodeSlack{ false };
+		ONLINE
+	};
 
-        double predictedDecodeSlackMs{ 0.0 };
+	// ============================================================
 
+	// Historical kNN sample.
 
+	// X_i = 과거 실제 실행 action의 feature
 
-        bool hasPredictedDeadlineMissProbability{ false };
+	// Y_i = feedback으로 받은 actual decode slack
 
-        double predictedDeadlineMissProbability{ 0.0 };
+	// ============================================================
 
+	struct SlackSample
 
+	{
+		SlackFeature feature;
 
-        // Action identity / execution metadata.
+		SlackActionIdentity action;
 
-        uint8_t spatialLayer{ 0u };
+		double decodeSlackMs{ 0.0 };
 
-        size_t fecIndex{ 0u };
+		bool deadlineMiss{ false };
 
-        double fecRedundancyRate{ 0.0 };
+		FrameOutcome outcome{ FrameOutcome::NORMAL };
 
-        uint8_t fecProtectionFactor{ 0u };
+		uint32_t frameId{ 0u };
 
-        bool pacingEnabled{ false };
+		// Cold Start samples are retained permanently.
 
+		// ONLINE samples are subject to FIFO aging.
 
+		KnnSampleOrigin origin{ KnnSampleOrigin::ONLINE };
+	};
 
-        // false: cold-start decision, true: kNN-selected decision.
+	static constexpr size_t KnnDebugNeighborCount{ 5u };
 
-        bool modelSelected{ false };
+	struct KnnNeighborDebugInfo
 
+	{
+		uint32_t frameId{ 0u };
 
+		double distance{ 0.0 };
 
-        // Balanced Cold Start에서만 true.
+		SlackFeature feature;
 
-        // true이면 WebRtcTransport가 legacy adaptive FEC / global ispacing 대신
+		SlackActionIdentity action;
 
-        // 이 decision의 FEC/Pacing을 현재 frame에 직접 적용한다.
+		double decodeSlackMs{ 0.0 };
 
-        bool forceRuntimeAction{ false };
+		bool deadlineMiss{ false };
+	};
 
+	struct SlackPrediction
 
+	{
+		double predictedDecodeSlackMs{ 0.0 };
 
-        // Cold Start pause 및 KNN evaluation pause에서 true.
+		double deadlineMissProbability{ 0.0 };
 
-        // prediction/action/FrameRecord/CSV는 모두 정상 수행하지만
+		size_t neighborCount{ 0u };
 
-        // SlackPredictor historical training sample에는 추가하지 않는다.
+		size_t sampleCount{ 0u };
 
-        bool skipKnnTrainingSample{ false };
+		size_t debugNeighborCount{ 0u };
 
+		std::array<KnnNeighborDebugInfo, KnnDebugNeighborCount> debugNeighbors{};
 
+		double lateProbability{ 0.0 };
+		double dropProbability{ 0.0 };
+	};
 
-        // Cold Start experiment metadata.
+	class SlackPredictor
 
-        KnnColdStartPhase coldStartPhase{ KnnColdStartPhase::NONE };
+	{
+	public:
+		struct Config
+		{
+			size_t maxOnlineSamples{ 6000u };
 
-        KnnColdStartNetworkProfile coldStartNetworkProfile{ KnnColdStartNetworkProfile::NORMAL };
+			size_t k{ 15u };
 
-        KnnColdStartNetworkProfile coldStartTargetNetworkProfile{ KnnColdStartNetworkProfile::NORMAL };
+			size_t minSamplesToPredict{ 2000u };
+			size_t minSamplesPerSpatialLayer{ 200u };
 
-
-
-        // pause frame이면 1~150, 그 외에는 0.
-
-        size_t coldStartPauseFrameIndex{ 0u };
-
-
-
-        // ============================================================
-
-        // KNN evaluation metadata.
-
-        //
-
-        // modelSelected == true인 KNN frame에서도
-
-        // 현재 evaluation phase를 FrameRecord/CSV에 보존.
-
-        // ============================================================
-
-
-
-        KnnEvaluationPhase knnEvaluationPhase{ KnnEvaluationPhase::NONE };
-
-
-
-        // 이 frame을 decision한 시점에서 현재 실험 network profile.
-
-        KnnColdStartNetworkProfile knnEvaluationNetworkProfile{ KnnColdStartNetworkProfile::NORMAL };
-
-
-
-        // pause 중 변경하려는 목표 network.
-
-        // collect 상태에서는 current == target.
-
-        KnnColdStartNetworkProfile knnEvaluationTargetNetworkProfile{ KnnColdStartNetworkProfile::NORMAL };
-
-
-
-        // 각 evaluation phase 내부 frame 번호.
-
-        //
-
-        // pause   : 1 ~ 150
-
-        // collect : 1 ~ 1500
-
-        // 그 외   : 0
-
-        size_t knnEvaluationPhaseFrameIndex{ 0u };
-
-
-
-        // 현재 option의 마지막 network collection 1500번째 logical frame.
-
-        // Option별 마지막 profile은 A~H의 profile sequence에 의해 결정된다.
-
-        // WebRtcTransport가 이 frame의 feedback/CSV 기록을 끝낸 뒤
-
-        // [KNN-EXPERIMENT-COMPLETE] 로그를 출력하는 데 사용.
-
-        bool knnEvaluationTerminalFrame{ false };
-
-    };
-
-
-
-    struct SlackRuntimeActionState
-
-    {
-
-        bool fecEnabled{ false };
-
-        uint8_t fecProtectionFactor{ 0u };
-
-        bool pacingEnabled{ false };
-
-    };
-
-
-
-    enum class FrameOutcome : uint8_t
-
-    {
-
-        NORMAL = 0,
-
-        LATE,
-
-        PRE_DECODE_DROP
-
-    };
-
-
-
-    enum class KnnSampleOrigin : uint8_t
-
-    {
-
-        COLD_START = 0,
-
-        ONLINE
-
-    };
-
-
-
-    // ============================================================
-
-    // Historical kNN sample.
-
-    // X_i = 과거 실제 실행 action의 feature
-
-    // Y_i = feedback으로 받은 actual decode slack
-
-    // ============================================================
-
-    struct SlackSample
-
-    {
-
-        SlackFeature feature;
-
-        SlackActionIdentity action;
-
-
-
-        double decodeSlackMs{ 0.0 };
-
-        bool deadlineMiss{ false };
-
-        FrameOutcome outcome{ FrameOutcome::NORMAL };
-
-
-
-        uint32_t frameId{ 0u };
-
-
-
-        // Cold Start samples are retained permanently.
-
-        // ONLINE samples are subject to FIFO aging.
-
-        KnnSampleOrigin origin{ KnnSampleOrigin::ONLINE };
-
-    };
-
-
-
-    static constexpr size_t KnnDebugNeighborCount{ 5u };
-
-
-
-    struct KnnNeighborDebugInfo
-
-    {
-
-        uint32_t frameId{ 0u };
-
-        double distance{ 0.0 };
-
-        SlackFeature feature;
-
-        SlackActionIdentity action;
-
-        double decodeSlackMs{ 0.0 };
-
-        bool deadlineMiss{ false };
-
-    };
-
-
-
-    struct SlackPrediction
-
-    {
-
-        double predictedDecodeSlackMs{ 0.0 };
-
-        double deadlineMissProbability{ 0.0 };
-
-        size_t neighborCount{ 0u };
-
-
-
-        size_t sampleCount{ 0u };
-
-        size_t debugNeighborCount{ 0u };
-
-        std::array<KnnNeighborDebugInfo, KnnDebugNeighborCount> debugNeighbors{};
-
-    };
-
-
-
-    class SlackPredictor
-
-    {
-
-    public:
-
-        struct Config
-
-        {
-
-            size_t maxOnlineSamples{ 6000u };
-
-            size_t k{ 7u };
-
-            size_t minSamplesToPredict{ 2000u };
-
-            size_t minSamplesPerSpatialLayer{ 200u };
-
-
-
-            // Feature normalization scale.
-
-            double rttScaleMs{ 100.0 };
-
-            double lossScale{ 0.05 };
-
-            double bandwidthScaleBps{ 5000000.0 };
-
-            double congestionScale{ 1.0 };
-
-            double frameSizeScaleBytes{ 20'000.0 };
-
+			// Feature normalization
+			double rttScaleMs{ 100.0 };
+			double lossScale{ 0.05 };
+			double bandwidthScaleBps{ 5000000.0 };
+			double congestionScale{ 1.0 };
+			double frameSizeScaleBytes{20'000.0 };  
             double pacingDelayScaleMs{ 50.0 };
 
+			// Legacy action-distance terms
+			double spatialLayerMismatchDistance{ 1.0 };
+			double fecProtectionScale{ 128.0 };
+			double pacingMismatchDistance{ 1.0 };
 
+			// Slack bin width
+			double safetyBinWidthMs{ 5.0 };
 
-            // Legacy action-distance terms. With action-conditioned prediction ON,
+			// Allowed empirical failure probability
+			double maxCalibrationFailureRisk{ 0.05 };
 
-            // exact same-action filtering makes these terms all zero.
+			// Minimum observations in a Slack bin
+			size_t minCalibrationBinSamples{ 30u };
 
-            double spatialLayerMismatchDistance{ 1.0 };
+			// Recent Online calibration window
+			size_t maxRecentCalibrationSamples{ 2000u };
 
-            double fecProtectionScale{ 128.0 };
+			// Boundary update interval
+			size_t boundaryUpdateInterval{ 150u };
 
-            double pacingMismatchDistance{ 1.0 };
+			// Slow boundary adaptation
+			double boundaryEmaAlpha{ 0.05 };
+			double maxBoundaryStepMs{ 1.0 };
 
-        };
+			// Cold prior weight
+			double coldBoundaryWeight{ 0.5 };
+		};
 
+		public:
+			SlackPredictor();
 
+			explicit SlackPredictor(const Config& config);
 
-        public:
+		public:
+			bool AddSample(const SlackSample& sample);
 
-            SlackPredictor();
+			size_t GetSampleCount() const;
 
-            explicit SlackPredictor(const Config& config);
+			size_t GetColdStartSampleCount() const;
 
+			size_t GetOnlineSampleCount() const;
 
+			bool CanPredict() const;
 
-        public:
+			std::optional<SlackPrediction> Predict(
 
-            bool AddSample(const SlackSample& sample);
+			  const SlackFeature& feature, const SlackActionIdentity& action) const;
 
-            size_t GetSampleCount() const;
+			void Clear();
 
-            size_t GetColdStartSampleCount() const;
+		public:
+			// Cold collection 완료 후 최초 KNN decision에서 호출
+			void InitializeSafetyBoundaries();
 
-            size_t GetOnlineSampleCount() const;
+			// Current layer-specific boundaries
+			std::array<double, 3> GetSafetyBoundaries() const;
 
-            bool CanPredict() const;
+		private:
+			struct Neighbor
 
+			{
+				double distance{ 0.0 };
 
+				double decodeSlackMs{ 0.0 };
 
-            std::optional<SlackPrediction> Predict(
+				bool deadlineMiss{ false };
 
-              const SlackFeature& feature, const SlackActionIdentity& action) const;
+				const SlackSample* sample{ nullptr };
+			};
 
+		private:
+			double ComputeDistance(
 
+			  const SlackFeature& aFeature,
 
-            void Clear();
+			  const SlackActionIdentity& aAction,
 
+			  const SlackFeature& bFeature,
 
+			  const SlackActionIdentity& bAction) const;
 
-        private:
+			double NormalizeDifference(double a, double b, double scale) const;
 
-            struct Neighbor
+			bool IsValidFeature(const SlackFeature& feature) const;
 
-            {
+			bool CanPredictLocked() const;
 
-                double distance{ 0.0 };
+			// Exact action identity comparison used by action-conditioned kNN.
 
-                double decodeSlackMs{ 0.0 };
+			bool IsSameAction(const SlackActionIdentity& a, const SlackActionIdentity& b) const;
 
-                bool deadlineMiss{ false };
+		private:
+			Config config;
 
-                const SlackSample* sample{ nullptr };
+			mutable std::mutex mutex;
 
-            };
+			// Cold Start samples are never aged out.
 
+			std::deque<SlackSample> coldStartSamples;
 
+			// Only KNN online samples are capped and FIFO-aged.
 
-        private:
+			std::deque<SlackSample> onlineSamples;
 
-            double ComputeDistance(
+			std::array<size_t, 3u> spatialLayerSampleCounts{ 0u, 0u, 0u };
 
-              const SlackFeature& aFeature,
+			bool initialSpatialCoverageSatisfied{ false };
 
-              const SlackActionIdentity& aAction,
+		private:
+			struct CalibrationState
+			{
+				std::array<double, 3> boundary{ 0.0, 0.0, 0.0 };
 
-              const SlackFeature& bFeature,
+				std::array<bool, 3> initialized{ false, false, false };
 
-              const SlackActionIdentity& bAction) const;
+				bool coldCalibrationInitialized{ false };
 
+				size_t onlineSamplesSinceUpdate{ 0u };
+			};
 
+			CalibrationState calibration;
 
-            double NormalizeDifference(double a, double b, double scale) const;
+			void UpdateSafetyBoundariesLocked();
 
-            bool IsValidFeature(const SlackFeature& feature) const;
+			std::optional<double> EstimateEmpiricalBoundary(
+			  const std::vector<const SlackSample*>& samples, size_t layer) const;
+		};
 
-            bool CanPredictLocked() const;
-
-
-
-            // Exact action identity comparison used by action-conditioned kNN.
-
-            bool IsSameAction(const SlackActionIdentity& a, const SlackActionIdentity& b) const;
-
-
-
-        private:
-
-            Config config;
-
-            mutable std::mutex mutex;
-
-
-
-            // Cold Start samples are never aged out.
-
-            std::deque<SlackSample> coldStartSamples;
-
-
-
-            // Only KNN online samples are capped and FIFO-aged.
-
-            std::deque<SlackSample> onlineSamples;
-
-
-
-            std::array<size_t, 3u> spatialLayerSampleCounts{ 0u, 0u, 0u };
-
-            bool initialSpatialCoverageSatisfied{ false };
-
-        };
-
-    } // namespace RTC
+	} // namespace RTC

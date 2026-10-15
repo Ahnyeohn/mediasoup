@@ -22,6 +22,7 @@
 
 #include "RTC/NetworkState.hpp"
 #include "RTC/SlackPredictor.hpp"
+#include <array>
 #include <deque>
 
 namespace RTC
@@ -69,6 +70,13 @@ namespace RTC
 			  const RTC::SlackFeature& feature,
 			  const RTC::SlackActionIdentity& action,
 			  RTC::SlackPrediction& prediction) = 0;
+
+			// Dynamic Slack Boundary
+			virtual bool OnConsumerGetKnnSafetyBoundaries(
+			  RTC::Consumer* consumer, bool coldStartCompleted, std::array<double, 3>& boundaries)
+			{
+				return false;
+			}
 
 			virtual bool OnConsumerGetSlackRuntimeActionState(
 			  RTC::Consumer* consumer, RTC::SlackRuntimeActionState& state) = 0;

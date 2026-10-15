@@ -30,9 +30,21 @@
 #include <iterator>                                              // std::ostream_iterator
 #include <map>                                                   // std::multimap
 
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <unordered_map>
+
+namespace
+{
+	bool IsCsvLoggingEnabled()
+	{
+		const char* value = std::getenv("QOS_CSV_LOGGING");
+
+		return value == nullptr || std::strcmp(value, "off") != 0;
+	}
+} // namespace
 
 namespace RTC
 {
@@ -411,7 +423,7 @@ namespace RTC
 		  this->maxMessageSize,
 		  sctpParameters,
 		  this->sctpAssociation ? flatbuffers::Optional<FBS::SctpAssociation::SctpState>(sctpState)
-		                        : flatbuffers::nullopt,
+			                      : flatbuffers::nullopt,
 		  sctpListener,
 		  &traceEventTypes);
 	}
@@ -471,7 +483,7 @@ namespace RTC
 		  nowMs,
 		  // sctpState.
 		  this->sctpAssociation ? flatbuffers::Optional<FBS::SctpAssociation::SctpState>(sctpState)
-		                        : flatbuffers::nullopt,
+			                      : flatbuffers::nullopt,
 		  // bytesReceived.
 		  this->recvTransmission.GetBytes(),
 		  // recvBitrate.
@@ -502,25 +514,25 @@ namespace RTC
 		  this->sendProbationTransmission.GetBitrate(nowMs),
 		  // availableOutgoingBitrate.
 		  this->tccClient ? flatbuffers::Optional<uint32_t>(this->tccClient->GetAvailableBitrate())
-		                  : flatbuffers::nullopt,
+			                : flatbuffers::nullopt,
 		  // availableIncomingBitrate.
 		  this->tccServer ? flatbuffers::Optional<uint32_t>(this->tccServer->GetAvailableBitrate())
-		                  : flatbuffers::nullopt,
+			                : flatbuffers::nullopt,
 		  // maxIncomingBitrate.
 		  this->maxIncomingBitrate ? flatbuffers::Optional<uint32_t>(this->maxIncomingBitrate)
-		                           : flatbuffers::nullopt,
+			                         : flatbuffers::nullopt,
 		  // maxOutgoingBitrate.
 		  this->maxOutgoingBitrate ? flatbuffers::Optional<uint32_t>(this->maxOutgoingBitrate)
-		                           : flatbuffers::nullopt,
+			                         : flatbuffers::nullopt,
 		  // minOutgoingBitrate.
 		  this->minOutgoingBitrate ? flatbuffers::Optional<uint32_t>(this->minOutgoingBitrate)
-		                           : flatbuffers::nullopt,
+			                         : flatbuffers::nullopt,
 		  // rtpPacketLossReceived.
 		  this->tccServer ? flatbuffers::Optional<double>(this->tccServer->GetPacketLoss())
-		                  : flatbuffers::nullopt,
+			                : flatbuffers::nullopt,
 		  // rtpPacketLossSent.
 		  this->tccClient ? flatbuffers::Optional<double>(this->tccClient->GetPacketLoss())
-		                  : flatbuffers::nullopt);
+			                : flatbuffers::nullopt);
 	}
 
 	void Transport::HandleRequest(Channel::ChannelRequest* request)
@@ -3282,13 +3294,15 @@ namespace RTC
 	}
 
 	bool RTC::Transport::OnConsumerPredictSlack(
-	  RTC::Consumer* /*consumer*/, const RTC::SlackFeature& /*feature*/, const RTC::SlackActionIdentity& /*action*/, RTC::SlackPrediction& prediction)
+	  RTC::Consumer* /*consumer*/,
+	  const RTC::SlackFeature& /*feature*/,
+	  const RTC::SlackActionIdentity& /*action*/,
+	  RTC::SlackPrediction& prediction)
 	{
 		prediction = RTC::SlackPrediction{};
 
 		return false;
 	}
-
 
 	bool RTC::Transport::OnConsumerGetSlackRuntimeActionState(
 	  RTC::Consumer* /*consumer*/, RTC::SlackRuntimeActionState& state)
@@ -3766,6 +3780,10 @@ namespace RTC
 
 	void RTC::Transport::WriteCamelMetricsCsv()
 	{
+		if (!IsCsvLoggingEnabled())
+		{
+			return;
+		}
 		static constexpr const char* CsvPath =
 		  "/home/n2sl/yeon/qos/network/log/frame/csv/camel_metrics.csv";
 

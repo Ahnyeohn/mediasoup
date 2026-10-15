@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <map>
+#include <vector>
 
 namespace RTC
 {
@@ -43,12 +46,10 @@ namespace RTC
 
 			while (this->onlineSamples.size() > this->config.maxOnlineSamples)
 			{
-				const auto& oldSample = this->onlineSamples.front();
+				const auto& oldSample        = this->onlineSamples.front();
 				const size_t oldSpatialLayer = static_cast<size_t>(oldSample.action.spatialLayer);
 
-				if (
-				  oldSpatialLayer < this->spatialLayerSampleCounts.size() &&
-				  this->spatialLayerSampleCounts[oldSpatialLayer] > 0u)
+				if (oldSpatialLayer < this->spatialLayerSampleCounts.size() && this->spatialLayerSampleCounts[oldSpatialLayer] > 0u)
 				{
 					--this->spatialLayerSampleCounts[oldSpatialLayer];
 				}
@@ -69,6 +70,22 @@ namespace RTC
 			if (l0Ready && l1Ready && l2Ready)
 			{
 				this->initialSpatialCoverageSatisfied = true;
+			}
+		}
+
+		// ============================================
+		// Online boundary update
+		// ============================================
+
+		if (sample.origin == KnnSampleOrigin::ONLINE && this->calibration.coldCalibrationInitialized)
+		{
+			++this->calibration.onlineSamplesSinceUpdate;
+
+			if (this->calibration.onlineSamplesSinceUpdate >= this->config.boundaryUpdateInterval)
+			{
+				this->calibration.onlineSamplesSinceUpdate = 0u;
+
+				UpdateSafetyBoundariesLocked();
 			}
 		}
 
@@ -96,12 +113,231 @@ namespace RTC
 		return this->onlineSamples.size();
 	}
 
+	std::optional<double> SlackPredictor::EstimateEmpiricalBoundary(
+	  const std::vector<const SlackSample*>& samples, size_t layer) const
+	{
+		struct RiskBin
+		{
+			size_t total{ 0u };
+			size_t failures{ 0u };
+		};
+
+		std::map<int, RiskBin> bins;
+
+		const double binWidth = this->config.safetyBinWidthMs;
+
+		if (binWidth <= 0.0)
+		{
+			return std::nullopt;
+		}
+
+		// ============================================
+		// 1. Build layer-specific Slack histogram
+		// ============================================
+
+		for (const auto* sample : samples)
+		{
+			if (!sample)
+			{
+				continue;
+			}
+
+			if (sample->action.spatialLayer != layer)
+			{
+				continue;
+			}
+
+			const double slack = sample->decodeSlackMs;
+
+			if (!std::isfinite(slack))
+			{
+				continue;
+			}
+
+			const int binIndex = static_cast<int>(std::floor(slack / binWidth));
+
+			auto& bin = bins[binIndex];
+
+			++bin.total;
+
+			if (sample->outcome == FrameOutcome::LATE || sample->outcome == FrameOutcome::PRE_DECODE_DROP)
+			{
+				++bin.failures;
+			}
+		}
+
+		if (bins.empty())
+		{
+			return std::nullopt;
+		}
+
+		// ============================================
+		// 2. Find lowest Slack bin in a contiguous
+		//    observed SAFE region
+		// ============================================
+
+		bool foundSafe{ false };
+		double boundary{ 0.0 };
+
+		for (auto it = bins.rbegin(); it != bins.rend(); ++it)
+		{
+			const auto& bin = it->second;
+
+			// Insufficient statistical support
+			if (bin.total < this->config.minCalibrationBinSamples)
+			{
+				break;
+			}
+
+			const double failureRisk = static_cast<double>(bin.failures) / static_cast<double>(bin.total);
+
+			// Empirical risk constraint
+			if (failureRisk > this->config.maxCalibrationFailureRisk)
+			{
+				break;
+			}
+
+			boundary = static_cast<double>(it->first) * binWidth;
+
+			foundSafe = true;
+		}
+
+		if (!foundSafe)
+		{
+			return std::nullopt;
+		}
+
+		return boundary;
+	}
+
+	void SlackPredictor::InitializeSafetyBoundaries()
+	{
+		std::lock_guard<std::mutex> lock(this->mutex);
+
+		if (this->calibration.coldCalibrationInitialized)
+		{
+			return;
+		}
+
+		// Explicit Cold completion 이후 한 번만 초기화.
+		this->calibration.coldCalibrationInitialized = true;
+
+		UpdateSafetyBoundariesLocked();
+	}
+
+	void SlackPredictor::UpdateSafetyBoundariesLocked()
+	{
+		std::vector<const SlackSample*> coldSamples;
+		std::vector<const SlackSample*> onlineSamples;
+
+		coldSamples.reserve(this->coldStartSamples.size());
+
+		for (const auto& sample : this->coldStartSamples)
+		{
+			coldSamples.push_back(&sample);
+		}
+
+		// ============================================
+		// Recent Online window
+		// ============================================
+
+		const size_t onlineCount =
+		  std::min(this->config.maxRecentCalibrationSamples, this->onlineSamples.size());
+
+		const size_t onlineBegin = this->onlineSamples.size() - onlineCount;
+
+		for (size_t i = onlineBegin; i < this->onlineSamples.size(); ++i)
+		{
+			onlineSamples.push_back(&this->onlineSamples[i]);
+		}
+
+		// ============================================
+		// Layer-specific boundary update
+		// ============================================
+
+		for (size_t layer{ 0u }; layer < 3u; ++layer)
+		{
+			const auto coldBoundary = EstimateEmpiricalBoundary(coldSamples, layer);
+
+			const auto onlineBoundary = EstimateEmpiricalBoundary(onlineSamples, layer);
+
+			if (!coldBoundary && !onlineBoundary)
+			{
+				continue;
+			}
+
+			double targetBoundary{ 0.0 };
+
+			if (coldBoundary && onlineBoundary)
+			{
+				const double coldWeight = this->config.coldBoundaryWeight;
+
+				targetBoundary = coldWeight * (*coldBoundary) + (1.0 - coldWeight) * (*onlineBoundary);
+			}
+			else if (coldBoundary)
+			{
+				targetBoundary = *coldBoundary;
+			}
+			else
+			{
+				targetBoundary = *onlineBoundary;
+			}
+
+			// Initial Cold calibration
+			if (!this->calibration.initialized[layer])
+			{
+				this->calibration.boundary[layer] = targetBoundary;
+
+				this->calibration.initialized[layer] = true;
+
+				continue;
+			}
+
+			// ========================================
+			// Online slow update: EMA + step clamp
+			// ========================================
+
+			const double oldBoundary = this->calibration.boundary[layer];
+
+			const double smoothedBoundary =
+			  oldBoundary + this->config.boundaryEmaAlpha * (targetBoundary - oldBoundary);
+
+			const double delta = std::clamp(
+			  smoothedBoundary - oldBoundary,
+			  -this->config.maxBoundaryStepMs,
+			  this->config.maxBoundaryStepMs);
+
+			this->calibration.boundary[layer] = oldBoundary + delta;
+		}
+	}
+
+	std::array<double, 3> SlackPredictor::GetSafetyBoundaries() const
+	{
+		std::lock_guard<std::mutex> lock(this->mutex);
+
+		std::array<double, 3> boundaries{};
+
+		for (size_t layer{ 0u }; layer < 3u; ++layer)
+		{
+			if (this->calibration.initialized[layer])
+			{
+				boundaries[layer] = this->calibration.boundary[layer];
+			}
+			else
+			{
+				// No calibration -> never mark SAFE
+				boundaries[layer] = std::numeric_limits<double>::infinity();
+			}
+		}
+
+		return boundaries;
+	}
+
 	bool SlackPredictor::CanPredictLocked() const
 	{
 		const size_t totalSamples = this->coldStartSamples.size() + this->onlineSamples.size();
 
-		return totalSamples >= this->config.minSamplesToPredict &&
-		       this->initialSpatialCoverageSatisfied;
+		return totalSamples >= this->config.minSamplesToPredict && this->initialSpatialCoverageSatisfied;
 	}
 
 	bool SlackPredictor::CanPredict() const
@@ -110,11 +346,9 @@ namespace RTC
 		return CanPredictLocked();
 	}
 
-	bool SlackPredictor::IsSameAction(
-	  const SlackActionIdentity& a, const SlackActionIdentity& b) const
+	bool SlackPredictor::IsSameAction(const SlackActionIdentity& a, const SlackActionIdentity& b) const
 	{
-		return a.spatialLayer == b.spatialLayer &&
-		       a.fecProtectionFactor == b.fecProtectionFactor &&
+		return a.spatialLayer == b.spatialLayer && a.fecProtectionFactor == b.fecProtectionFactor &&
 		       a.pacingEnabled == b.pacingEnabled;
 	}
 
@@ -142,18 +376,16 @@ namespace RTC
 		{
 			for (const auto& sample : samples)
 			{
-				if (
-				  RTC::KnnExperiment::ActionConditionedPredictionEnabled &&
-				  !IsSameAction(action, sample.action))
+				if (RTC::KnnExperiment::ActionConditionedPredictionEnabled && !IsSameAction(action, sample.action))
 				{
 					continue;
 				}
 
 				Neighbor neighbor;
-				neighbor.distance = ComputeDistance(feature, action, sample.feature, sample.action);
+				neighbor.distance      = ComputeDistance(feature, action, sample.feature, sample.action);
 				neighbor.decodeSlackMs = sample.decodeSlackMs;
-				neighbor.deadlineMiss = sample.deadlineMiss;
-				neighbor.sample = &sample;
+				neighbor.deadlineMiss  = sample.deadlineMiss;
+				neighbor.sample        = &sample;
 
 				neighbors.push_back(neighbor);
 			}
@@ -207,22 +439,50 @@ namespace RTC
 		}
 
 		double decodeSlackSumMs{ 0.0 };
+
 		size_t deadlineMissCount{ 0u };
+		size_t lateCount{ 0u };
+		size_t dropCount{ 0u };
 
 		for (size_t i{ 0u }; i < k; ++i)
 		{
 			const auto& neighbor = neighbors[i];
+
 			decodeSlackSumMs += neighbor.decodeSlackMs;
 
 			if (neighbor.deadlineMiss)
 			{
 				++deadlineMissCount;
 			}
+
+			if (neighbor.sample)
+			{
+				switch (neighbor.sample->outcome)
+				{
+					case FrameOutcome::NORMAL:
+						break;
+
+					case FrameOutcome::LATE:
+						++lateCount;
+						break;
+
+					case FrameOutcome::PRE_DECODE_DROP:
+						++dropCount;
+						break;
+				}
+			}
 		}
 
-		prediction.predictedDecodeSlackMs = decodeSlackSumMs / static_cast<double>(k);
-		prediction.deadlineMissProbability =
-		  static_cast<double>(deadlineMissCount) / static_cast<double>(k);
+		const double denominator = static_cast<double>(k);
+
+		prediction.predictedDecodeSlackMs = decodeSlackSumMs / denominator;
+
+		prediction.deadlineMissProbability = static_cast<double>(deadlineMissCount) / denominator;
+
+		// NEW: outcome-specific risk
+		prediction.lateProbability = static_cast<double>(lateCount) / denominator;
+
+		prediction.dropProbability = static_cast<double>(dropCount) / denominator;
 
 		return prediction;
 	}
@@ -233,16 +493,13 @@ namespace RTC
 	  const SlackFeature& bFeature,
 	  const SlackActionIdentity& bAction) const
 	{
-		const double dRtt =
-		  NormalizeDifference(aFeature.rttMs, bFeature.rttMs, this->config.rttScaleMs);
+		const double dRtt = NormalizeDifference(aFeature.rttMs, bFeature.rttMs, this->config.rttScaleMs);
 		const double dLoss =
 		  NormalizeDifference(aFeature.lossRate, bFeature.lossRate, this->config.lossScale);
 		const double dBw = NormalizeDifference(
-		  aFeature.availableBitrateBps,
-		  bFeature.availableBitrateBps,
-		  this->config.bandwidthScaleBps);
-		const double dCongestion = NormalizeDifference(
-		  aFeature.congestion, bFeature.congestion, this->config.congestionScale);
+		  aFeature.availableBitrateBps, bFeature.availableBitrateBps, this->config.bandwidthScaleBps);
+		const double dCongestion =
+		  NormalizeDifference(aFeature.congestion, bFeature.congestion, this->config.congestionScale);
 		const double dFrameSize = NormalizeDifference(
 		  aFeature.frameSizeBytes, bFeature.frameSizeBytes, this->config.frameSizeScaleBytes);
 		const double dPacingDelay = NormalizeDifference(
@@ -262,9 +519,8 @@ namespace RTC
 		  aAction.pacingEnabled == bAction.pacingEnabled ? 0.0 : this->config.pacingMismatchDistance;
 
 		const double squaredDistance =
-		  dRtt * dRtt + dLoss * dLoss + dBw * dBw + dCongestion * dCongestion +
-		  dFrameSize * dFrameSize + dPacingDelay * dPacingDelay +
-		  dSpatialLayer * dSpatialLayer + dFec * dFec + dPacing * dPacing;
+		  dRtt * dRtt + dLoss * dLoss + dBw * dBw + dCongestion * dCongestion + dFrameSize * dFrameSize +
+		  dPacingDelay * dPacingDelay + dSpatialLayer * dSpatialLayer + dFec * dFec + dPacing * dPacing;
 
 		return std::sqrt(squaredDistance);
 	}
@@ -281,12 +537,9 @@ namespace RTC
 
 	bool SlackPredictor::IsValidFeature(const SlackFeature& feature) const
 	{
-		return std::isfinite(feature.rttMs) &&
-		       std::isfinite(feature.lossRate) &&
-		       std::isfinite(feature.availableBitrateBps) &&
-		       std::isfinite(feature.congestion) &&
-		       std::isfinite(feature.frameSizeBytes) &&
-		       std::isfinite(feature.pacingDelayMs);
+		return std::isfinite(feature.rttMs) && std::isfinite(feature.lossRate) &&
+		       std::isfinite(feature.availableBitrateBps) && std::isfinite(feature.congestion) &&
+		       std::isfinite(feature.frameSizeBytes) && std::isfinite(feature.pacingDelayMs);
 	}
 
 	void SlackPredictor::Clear()
@@ -297,6 +550,8 @@ namespace RTC
 		this->onlineSamples.clear();
 		this->spatialLayerSampleCounts.fill(0u);
 		this->initialSpatialCoverageSatisfied = false;
+
+		this->calibration = CalibrationState{};
 	}
 
 } // namespace RTC

@@ -17,6 +17,7 @@
 #include <cmath>       // std::pow()
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
 #include <sstream>
@@ -114,10 +115,63 @@ namespace
 
 		return values[idx] * (1.0 - frac) + values[next] * frac;
 	}
+
+	static bool IsSfuKnnEnabled()
+	{
+		const char* value = std::getenv("SFU_KNN_ENABLED");
+
+		return value == nullptr || std::strcmp(value, "0") != 0;
+	}
+
+	static bool IsSfuAcePacingEnabled()
+	{
+		const char* value = std::getenv("SFU_ACE_PACING_ENABLED");
+
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}
+
+	static uint8_t GetSfuFixedFecProtectionFactor()
+	{
+		const char* value = std::getenv("SFU_FIXED_FEC_PF");
+
+		if (!value || *value == '\0')
+		{
+			return FecProtection25;
+		}
+
+		char* end{ nullptr };
+
+		const long parsed = std::strtol(value, &end, 10);
+
+		if (end == value || *end != '\0' || parsed < 0 || parsed > 255)
+		{
+			return FecProtection25;
+		}
+
+		return static_cast<uint8_t>(parsed);
+	}
+
+	static bool IsCsvLoggingEnabled()
+	{
+		const char* value = std::getenv("QOS_CSV_LOGGING");
+
+		// 환경변수가 없으면 기존 동작 유지 = CSV ON.
+		return value == nullptr || std::strcmp(value, "off") != 0;
+	}
 } // namespace
 
 // ===== pacing 여부 ====
-static bool ispacing = false;
+/*
+로컬:
+  SFU_KNN_ENABLED 없음
+  ispacing = false
+  이후 기존 Cold/KNN pacing decision 정상 수행
+Pod:
+  SFU_KNN_ENABLED=0
+  SFU_ACE_PACING_ENABLED=1
+  ispacing = true
+*/
+static bool ispacing = !IsSfuKnnEnabled() && IsSfuAcePacingEnabled();
 // ===== 패킷 send 분포 로그 ====
 static bool packetsendlog = false;
 
@@ -985,6 +1039,13 @@ namespace RTC
 
 	uint8_t RTC::WebRtcTransport::GetCurrentFecProtectionFactor() const
 	{
+		// Pod: fixed FEC
+		if (!IsSfuKnnEnabled())
+		{
+			return GetSfuFixedFecProtectionFactor();
+		}
+
+		// Local: 기존 동작 유지
 		return AdaptiveFecEnabled ? this->adaptiveFecProtectionFactor : FixedFecProtectionFactor;
 	}
 
@@ -1736,6 +1797,26 @@ namespace RTC
 		return true;
 	}
 
+	bool RTC::WebRtcTransport::OnConsumerGetKnnSafetyBoundaries(
+	  RTC::Consumer* /*consumer*/, bool coldStartCompleted, std::array<double, 3>& boundaries)
+	{
+		boundaries.fill(std::numeric_limits<double>::infinity());
+
+		if (!this->slackPredictor)
+		{
+			return false;
+		}
+
+		if (coldStartCompleted)
+		{
+			this->slackPredictor->InitializeSafetyBoundaries();
+		}
+
+		boundaries = this->slackPredictor->GetSafetyBoundaries();
+
+		return true;
+	}
+
 	bool RTC::WebRtcTransport::OnConsumerGetSlackRuntimeActionState(
 	  RTC::Consumer* consumer, RTC::SlackRuntimeActionState& state)
 	{
@@ -1787,6 +1868,11 @@ namespace RTC
 
 	void RTC::WebRtcTransport::OnConsumerSetColdStartPacing(RTC::Consumer* /*consumer*/, bool enabled)
 	{
+		if (!IsSfuKnnEnabled())
+		{
+			return;
+		}
+
 		if (ispacing == enabled)
 		{
 			return;
@@ -2054,11 +2140,11 @@ namespace RTC
 			//
 			// rtpTimestampRewriteOffsetMs =
 			//   signed(frameId - logicalFrameId) * 1000 / 90000
-			
+
 			// 별도 outcome:
 			// deadlineMiss = LATE || DROP
 			// --------------------------------------------------------
-			if (this->slackPredictor)
+			if (IsSfuKnnEnabled() && this->slackPredictor)
 			{
 				RTC::SlackSample sample;
 
@@ -2220,7 +2306,10 @@ namespace RTC
 		MS_TRACE();
 		this->networkState = std::make_unique<RTC::NetworkState>();
 		// this->frameRecordTable = std::make_unique<RTC::FrameRecordTable>(5000);
-		this->slackPredictor = std::make_unique<RTC::SlackPredictor>();
+		if (IsSfuKnnEnabled())
+		{
+			this->slackPredictor = std::make_unique<RTC::SlackPredictor>();
+		}
 		try
 		{
 			const auto* listenIndividual = options->listen_as<FBS::WebRtcTransport::ListenIndividual>();
@@ -2485,21 +2574,27 @@ namespace RTC
 		// multi viewer를 지원하기 위해 비활성화 혹은 제거
 		// this->frameRecordTable = GetSharedFrameRecordTable();
 
-		this->slackPredictor = std::make_unique<RTC::SlackPredictor>();
-
-		if (ispacing)
+		if (IsSfuKnnEnabled())
 		{
-			this->frameRecordCsvWriter = std::make_unique<RTC::FrameRecordCsvWriter>(
-			  "/home/n2sl/yeon/qos/network/log/frame/csv/frame_records_pacing.csv");
-		}
-		else
-		{
-			this->frameRecordCsvWriter = std::make_unique<RTC::FrameRecordCsvWriter>(
-			  "/home/n2sl/yeon/qos/network/log/frame/csv/frame_records.csv");
+			this->slackPredictor = std::make_unique<RTC::SlackPredictor>();
 		}
 
-		this->framePacketCsvWriter = std::make_unique<RTC::FramePacketCsvWriter>(
-		  "/home/n2sl/yeon/qos/network/log/frame/csv/frame_packets.csv");
+		if (IsCsvLoggingEnabled())
+		{
+			if (ispacing)
+			{
+				this->frameRecordCsvWriter = std::make_unique<RTC::FrameRecordCsvWriter>(
+				  "/home/n2sl/yeon/qos/network/log/frame/csv/frame_records_pacing.csv");
+			}
+			else
+			{
+				this->frameRecordCsvWriter = std::make_unique<RTC::FrameRecordCsvWriter>(
+				  "/home/n2sl/yeon/qos/network/log/frame/csv/frame_records.csv");
+			}
+
+			this->framePacketCsvWriter = std::make_unique<RTC::FramePacketCsvWriter>(
+			  "/home/n2sl/yeon/qos/network/log/frame/csv/frame_packets.csv");
+		}
 
 		try
 		{
@@ -3858,8 +3953,8 @@ namespace RTC
 		// Balanced Cold Start: forceRuntimeAction=true
 		// Legacy Cold Start:   both false -> existing runtime FEC/Pacing
 		// ============================================================
-		const bool useFrameAction =
-		  hasFrameAction && (frameAction.modelSelected || frameAction.forceRuntimeAction);
+		const bool useFrameAction = IsSfuKnnEnabled() && hasFrameAction &&
+		                            (frameAction.modelSelected || frameAction.forceRuntimeAction);
 
 		const uint8_t frameFecProtectionFactor =
 		  useFrameAction ? frameAction.fecProtectionFactor : GetCurrentFecProtectionFactor();
@@ -5100,6 +5195,11 @@ namespace RTC
 
 	void RTC::WebRtcTransport::UpdateAdaptiveFecProtection(int64_t nowMs)
 	{
+		// Pod fixed-FEC mode
+		if (!IsSfuKnnEnabled())
+		{
+			return;
+		}
 		if (!AdaptiveFecEnabled)
 		{
 			return;

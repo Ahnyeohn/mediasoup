@@ -24,16 +24,53 @@
 #include "RTC/NetworkState.hpp"
 
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 
-static std::ofstream g_knnLayerRankCsv(
-  "/home/n2sl/yeon/qos/network/log/frame/knn_layer_rank.csv", std::ios::out | std::ios::trunc);
+namespace
+{
+	bool IsSfuKnnEnabled()
+	{
+		const char* value = std::getenv("SFU_KNN_ENABLED");
+
+		// 환경변수가 없으면 기존 KNN/Cold Start 유지
+		if (!value)
+		{
+			return true;
+		}
+
+		return std::strcmp(value, "0") != 0;
+	}
+} // namespace
+static bool IsCsvLoggingEnabled()
+{
+	const char* value = std::getenv("QOS_CSV_LOGGING");
+
+	return value == nullptr || std::strcmp(value, "off") != 0;
+}
+
+static std::ofstream OpenCsvIfEnabled(const char* path)
+{
+	std::ofstream stream;
+
+	if (IsCsvLoggingEnabled())
+	{
+		stream.open(path, std::ios::out | std::ios::trunc);
+	}
+
+	return stream;
+}
+
+static std::ofstream g_knnLayerRankCsv =
+  OpenCsvIfEnabled("/home/n2sl/yeon/qos/network/log/frame/knn_layer_rank.csv");
+
 static bool g_knnLayerRankHeaderWritten{ false };
 
-static std::ofstream g_knnNeighborCsv(
-  "/home/n2sl/yeon/qos/network/log/frame/knn_neighbor_debug.csv", std::ios::out | std::ios::trunc);
+static std::ofstream g_knnNeighborCsv =
+  OpenCsvIfEnabled("/home/n2sl/yeon/qos/network/log/frame/knn_neighbor_debug.csv");
+
 static bool g_knnNeighborHeaderWritten{ false };
 
 namespace
@@ -135,10 +172,10 @@ namespace RTC
 	struct KnnNetworkProfileSequence
 	{
 		std::array<RTC::KnnColdStartNetworkProfile, 4u> profiles{
-		  RTC::KnnColdStartNetworkProfile::NORMAL,
-		  RTC::KnnColdStartNetworkProfile::NORMAL,
-		  RTC::KnnColdStartNetworkProfile::NORMAL,
-		  RTC::KnnColdStartNetworkProfile::NORMAL
+			RTC::KnnColdStartNetworkProfile::NORMAL,
+			RTC::KnnColdStartNetworkProfile::NORMAL,
+			RTC::KnnColdStartNetworkProfile::NORMAL,
+			RTC::KnnColdStartNetworkProfile::NORMAL
 		};
 
 		size_t count{ 1u };
@@ -152,83 +189,67 @@ namespace RTC
 		switch (option)
 		{
 			case RTC::KnnExperiment::NetworkExperimentOption::A:
-				sequence.profiles = {
-				  RTC::KnnColdStartNetworkProfile::NORMAL,
-				  RTC::KnnColdStartNetworkProfile::LIMIT_2MBIT,
-				  RTC::KnnColdStartNetworkProfile::NORMAL,
-				  RTC::KnnColdStartNetworkProfile::NORMAL
-				};
-				sequence.count = 2u;
+				sequence.profiles = { RTC::KnnColdStartNetworkProfile::NORMAL,
+				                      RTC::KnnColdStartNetworkProfile::LIMIT_2MBIT,
+				                      RTC::KnnColdStartNetworkProfile::NORMAL,
+				                      RTC::KnnColdStartNetworkProfile::NORMAL };
+				sequence.count    = 2u;
 				break;
 
 			case RTC::KnnExperiment::NetworkExperimentOption::B:
-				sequence.profiles = {
-				  RTC::KnnColdStartNetworkProfile::NORMAL,
-				  RTC::KnnColdStartNetworkProfile::LIMIT_4MBIT,
-				  RTC::KnnColdStartNetworkProfile::NORMAL,
-				  RTC::KnnColdStartNetworkProfile::NORMAL
-				};
-				sequence.count = 2u;
+				sequence.profiles = { RTC::KnnColdStartNetworkProfile::NORMAL,
+				                      RTC::KnnColdStartNetworkProfile::LIMIT_4MBIT,
+				                      RTC::KnnColdStartNetworkProfile::NORMAL,
+				                      RTC::KnnColdStartNetworkProfile::NORMAL };
+				sequence.count    = 2u;
 				break;
 
 			case RTC::KnnExperiment::NetworkExperimentOption::C:
-				sequence.profiles = {
-				  RTC::KnnColdStartNetworkProfile::NORMAL,
-				  RTC::KnnColdStartNetworkProfile::LIMIT_2MBIT,
-				  RTC::KnnColdStartNetworkProfile::LIMIT_4MBIT,
-				  RTC::KnnColdStartNetworkProfile::NORMAL
-				};
-				sequence.count = 3u;
+				sequence.profiles = { RTC::KnnColdStartNetworkProfile::NORMAL,
+				                      RTC::KnnColdStartNetworkProfile::LIMIT_2MBIT,
+				                      RTC::KnnColdStartNetworkProfile::LIMIT_4MBIT,
+				                      RTC::KnnColdStartNetworkProfile::NORMAL };
+				sequence.count    = 3u;
 				break;
 
 			case RTC::KnnExperiment::NetworkExperimentOption::D:
-				sequence.profiles = {
-				  RTC::KnnColdStartNetworkProfile::NORMAL,
-				  RTC::KnnColdStartNetworkProfile::LIMIT_2MBIT,
-				  RTC::KnnColdStartNetworkProfile::LIMIT_4MBIT,
-				  RTC::KnnColdStartNetworkProfile::LIMIT_6MBIT
-				};
-				sequence.count = 4u;
+				sequence.profiles = { RTC::KnnColdStartNetworkProfile::NORMAL,
+				                      RTC::KnnColdStartNetworkProfile::LIMIT_2MBIT,
+				                      RTC::KnnColdStartNetworkProfile::LIMIT_4MBIT,
+				                      RTC::KnnColdStartNetworkProfile::LIMIT_6MBIT };
+				sequence.count    = 4u;
 				break;
 
 			case RTC::KnnExperiment::NetworkExperimentOption::E:
-				sequence.profiles = {
-				  RTC::KnnColdStartNetworkProfile::NORMAL,
-				  RTC::KnnColdStartNetworkProfile::LOSS_2PCT,
-				  RTC::KnnColdStartNetworkProfile::NORMAL,
-				  RTC::KnnColdStartNetworkProfile::NORMAL
-				};
-				sequence.count = 2u;
+				sequence.profiles = { RTC::KnnColdStartNetworkProfile::NORMAL,
+				                      RTC::KnnColdStartNetworkProfile::LOSS_2PCT,
+				                      RTC::KnnColdStartNetworkProfile::NORMAL,
+				                      RTC::KnnColdStartNetworkProfile::NORMAL };
+				sequence.count    = 2u;
 				break;
 
 			case RTC::KnnExperiment::NetworkExperimentOption::F:
-				sequence.profiles = {
-				  RTC::KnnColdStartNetworkProfile::NORMAL,
-				  RTC::KnnColdStartNetworkProfile::LOSS_5PCT,
-				  RTC::KnnColdStartNetworkProfile::NORMAL,
-				  RTC::KnnColdStartNetworkProfile::NORMAL
-				};
-				sequence.count = 2u;
+				sequence.profiles = { RTC::KnnColdStartNetworkProfile::NORMAL,
+				                      RTC::KnnColdStartNetworkProfile::LOSS_5PCT,
+				                      RTC::KnnColdStartNetworkProfile::NORMAL,
+				                      RTC::KnnColdStartNetworkProfile::NORMAL };
+				sequence.count    = 2u;
 				break;
 
 			case RTC::KnnExperiment::NetworkExperimentOption::G:
-				sequence.profiles = {
-				  RTC::KnnColdStartNetworkProfile::NORMAL,
-				  RTC::KnnColdStartNetworkProfile::LOSS_15PCT,
-				  RTC::KnnColdStartNetworkProfile::NORMAL,
-				  RTC::KnnColdStartNetworkProfile::NORMAL
-				};
-				sequence.count = 2u;
+				sequence.profiles = { RTC::KnnColdStartNetworkProfile::NORMAL,
+				                      RTC::KnnColdStartNetworkProfile::LOSS_15PCT,
+				                      RTC::KnnColdStartNetworkProfile::NORMAL,
+				                      RTC::KnnColdStartNetworkProfile::NORMAL };
+				sequence.count    = 2u;
 				break;
 
 			case RTC::KnnExperiment::NetworkExperimentOption::H:
-				sequence.profiles = {
-				  RTC::KnnColdStartNetworkProfile::NORMAL,
-				  RTC::KnnColdStartNetworkProfile::LIMIT_2MBIT,
-				  RTC::KnnColdStartNetworkProfile::LIMIT_4MBIT,
-				  RTC::KnnColdStartNetworkProfile::LOSS_5PCT
-				};
-				sequence.count = 4u;
+				sequence.profiles = { RTC::KnnColdStartNetworkProfile::NORMAL,
+				                      RTC::KnnColdStartNetworkProfile::LIMIT_2MBIT,
+				                      RTC::KnnColdStartNetworkProfile::LIMIT_4MBIT,
+				                      RTC::KnnColdStartNetworkProfile::LOSS_5PCT };
+				sequence.count    = 4u;
 				break;
 		}
 
@@ -604,8 +625,14 @@ namespace RTC
 		RTC::SlackActionIdentity action;
 
 		bool hasPrediction{ false };
+
 		double predictedDecodeSlackMs{ 0.0 };
+
 		double predictedDeadlineMissProbability{ 0.0 };
+
+		// NEW
+		double predictedLateProbability{ 0.0 };
+		double predictedDropProbability{ 0.0 };
 
 		// ========================================================
 		// yeon: 해당 candidate prediction에 실제 사용된 neighbors.
@@ -639,20 +666,144 @@ namespace RTC
 		return candidate.pacingIndex > best.pacingIndex;
 	}
 
-	static bool IsBetterKnnAction(const ActionCandidate& candidate, const ActionCandidate& currentBest)
+	// static bool IsBetterKnnAction(const ActionCandidate& candidate, const ActionCandidate& currentBest)
+	// {
+	// 	constexpr double Epsilon{ 1e-9 };
+
+	// 	if (candidate.predictedDeadlineMissProbability < currentBest.predictedDeadlineMissProbability
+	// - Epsilon)
+	// 	{
+	// 		return true;
+	// 	}
+
+	// 	if (candidate.predictedDeadlineMissProbability > currentBest.predictedDeadlineMissProbability
+	// + Epsilon)
+	// 	{
+	// 		return false;
+	// 	}
+
+	// 	if (candidate.predictedDecodeSlackMs > currentBest.predictedDecodeSlackMs + Epsilon)
+	// 	{
+	// 		return true;
+	// 	}
+
+	// 	if (candidate.predictedDecodeSlackMs < currentBest.predictedDecodeSlackMs - Epsilon)
+	// 	{
+	// 		return false;
+	// 	}
+
+	// 	return IsBetterSafeAction(candidate, currentBest);
+	// }
+	// // 이제 slack 최대값을 선택하는게 아니라, 다음 규칙 적용:
+	// // 1순위 Deadline miss probability 최소
+	// // 2순위 Predicted decode Slack
+	// static const ActionCandidate* SelectBestKnnAction(const ActionCandidateList& candidates)
+	// {
+	// 	const ActionCandidate* best{ nullptr };
+
+	// 	for (const auto& candidate : candidates)
+	// 	{
+	// 		if (!candidate.hasPrediction)
+	// 		{
+	// 			continue;
+	// 		}
+
+	// 		if (!best || IsBetterKnnAction(candidate, *best))
+	// 		{
+	// 			best = &candidate;
+	// 		}
+	// 	}
+
+	// 	return best;
+	// }
+
+	// static const ActionCandidate* SelectBestKnnActionForLayer(
+	//   const ActionCandidateList& candidates, size_t fixedLayer)
+	// {
+	// 	const ActionCandidate* best{ nullptr };
+
+	// 	for (const auto& candidate : candidates)
+	// 	{
+	// 		if (candidate.layer != fixedLayer)
+	// 		{
+	// 			continue;
+	// 		}
+
+	// 		if (!candidate.hasPrediction)
+	// 		{
+	// 			continue;
+	// 		}
+
+	// 		if (!best || IsBetterKnnAction(candidate, *best))
+	// 		{
+	// 			best = &candidate;
+	// 		}
+	// 	}
+
+	// 	return best;
+	// }
+
+	// ============================================================
+	// Dynamic Slack Boundary / QoS-first KNN Selection
+	// ============================================================
+
+	static constexpr double KnnMaxFailureRisk{ 0.05 };
+
+	static double GetKnnFailureRisk(const ActionCandidate& candidate)
 	{
-		constexpr double Epsilon{ 1e-9 };
+		return candidate.predictedLateProbability + candidate.predictedDropProbability;
+	}
 
-		if (candidate.predictedDeadlineMissProbability < currentBest.predictedDeadlineMissProbability - Epsilon)
-		{
-			return true;
-		}
-
-		if (candidate.predictedDeadlineMissProbability > currentBest.predictedDeadlineMissProbability + Epsilon)
+	static bool IsKnnSafeAction(const ActionCandidate& candidate, const std::array<double, 3>& boundaries)
+	{
+		if (!candidate.hasPrediction)
 		{
 			return false;
 		}
 
+		if (candidate.layer >= boundaries.size())
+		{
+			return false;
+		}
+
+		const double predictedSlack = candidate.predictedDecodeSlackMs;
+
+		const double boundary = boundaries[candidate.layer];
+
+		if (!std::isfinite(predictedSlack) || !std::isfinite(boundary))
+		{
+			return false;
+		}
+
+		const double margin = predictedSlack - boundary;
+
+		const double failureRisk = GetKnnFailureRisk(candidate);
+
+		return margin >= 0.0 && std::isfinite(failureRisk) && failureRisk <= KnnMaxFailureRisk;
+	}
+
+	// Compare candidates within the SAME layer.
+	static bool IsBetterKnnAction(const ActionCandidate& candidate, const ActionCandidate& currentBest)
+	{
+		constexpr double Epsilon{ 1e-9 };
+
+		const double risk = GetKnnFailureRisk(candidate);
+
+		const double bestRisk = GetKnnFailureRisk(currentBest);
+
+		// 1. Lowest failure risk
+		if (risk < bestRisk - Epsilon)
+		{
+			return true;
+		}
+
+		if (risk > bestRisk + Epsilon)
+		{
+			return false;
+		}
+
+		// 2. Largest Slack margin
+		// Same layer -> same boundary
 		if (candidate.predictedDecodeSlackMs > currentBest.predictedDecodeSlackMs + Epsilon)
 		{
 			return true;
@@ -663,18 +814,30 @@ namespace RTC
 			return false;
 		}
 
-		return IsBetterSafeAction(candidate, currentBest);
+		// 3. Deterministic tie-break
+		// Not an overhead optimization
+		if (candidate.fecIndex != currentBest.fecIndex)
+		{
+			return candidate.fecIndex < currentBest.fecIndex;
+		}
+
+		return candidate.pacingIndex < currentBest.pacingIndex;
 	}
-	// 이제 slack 최대값을 선택하는게 아니라, 다음 규칙 적용:
-	// 1순위 Deadline miss probability 최소
-	// 2순위 Predicted decode Slack
-	static const ActionCandidate* SelectBestKnnAction(const ActionCandidateList& candidates)
+
+	// Best SAFE candidate for a fixed layer.
+	static const ActionCandidate* SelectBestKnnActionForLayer(
+	  const ActionCandidateList& candidates, size_t fixedLayer, const std::array<double, 3>& boundaries)
 	{
 		const ActionCandidate* best{ nullptr };
 
 		for (const auto& candidate : candidates)
 		{
-			if (!candidate.hasPrediction)
+			if (candidate.layer != fixedLayer)
+			{
+				continue;
+			}
+
+			if (!IsKnnSafeAction(candidate, boundaries))
 			{
 				continue;
 			}
@@ -688,19 +851,39 @@ namespace RTC
 		return best;
 	}
 
-	static const ActionCandidate* SelectBestKnnActionForLayer(
-	  const ActionCandidateList& candidates, size_t fixedLayer)
+	// Highest SAFE layer wins.
+	static const ActionCandidate* SelectBestKnnAction(
+	  const ActionCandidateList& candidates, const std::array<double, 3>& boundaries)
+	{
+		for (int layer = 2; layer >= 0; --layer)
+		{
+			const auto* best =
+			  SelectBestKnnActionForLayer(candidates, static_cast<size_t>(layer), boundaries);
+
+			if (best)
+			{
+				return best;
+			}
+		}
+
+		return nullptr;
+	}
+
+	// No SAFE action: choose lowest-risk L0 fallback.
+	static const ActionCandidate* SelectKnnEmergencyAction(const ActionCandidateList& candidates)
 	{
 		const ActionCandidate* best{ nullptr };
 
 		for (const auto& candidate : candidates)
 		{
-			if (candidate.layer != fixedLayer)
+			if (candidate.layer != 0u || !candidate.hasPrediction)
 			{
 				continue;
 			}
 
-			if (!candidate.hasPrediction)
+			const double risk = GetKnnFailureRisk(candidate);
+
+			if (!std::isfinite(risk) || !std::isfinite(candidate.predictedDecodeSlackMs))
 			{
 				continue;
 			}
@@ -1241,28 +1424,22 @@ namespace RTC
 		MS_ASSERT(this->externallyManagedBitrate, "bitrate is not externally managed");
 		MS_ASSERT(IsActive(), "should be active");
 
-		// Preferred spatial layer에 slack 기반 cap을 반영한다.
-		// slackMaxSpatialLayer == -1 이면 제한 없음.
 		int16_t effectivePreferredSpatialLayer = this->preferredLayers.spatial;
 
 		int16_t controllerMaxSpatialLayer{ -1 };
 
-		if (this->knnControlActive && this->knnMaxSpatialLayer >= 0)
+		// KNN enabled: 기존 Cold Start/KNN layer cap 유지.
+		// KNN disabled: cap을 적용하지 않고 BWE allocator에 위임.
+		if (IsSfuKnnEnabled())
 		{
-			// KNN mode.
-			controllerMaxSpatialLayer = this->knnMaxSpatialLayer;
-		}
-		else if (!this->knnColdStartCollectionComplete)
-		{
-			// Initial Cold Start에서만 collection layer를 cap으로 사용.
-			controllerMaxSpatialLayer = this->knnColdStartCollectionLayer;
-		}
-		else
-		{
-			// Cold Start는 이미 완료되었지만 아직 유효 KNN cap 없음.
-			// 절대로 cold-start layer cap을 다시 적용하지 않는다.
-			// 기존 mediasoup BWE allocator에게 맡긴다.
-			controllerMaxSpatialLayer = -1;
+			if (this->knnControlActive && this->knnMaxSpatialLayer >= 0)
+			{
+				controllerMaxSpatialLayer = this->knnMaxSpatialLayer;
+			}
+			else if (!this->knnColdStartCollectionComplete)
+			{
+				controllerMaxSpatialLayer = this->knnColdStartCollectionLayer;
+			}
 		}
 
 		if (controllerMaxSpatialLayer >= 0)
@@ -1689,7 +1866,7 @@ namespace RTC
 
 		// custom metadata가 존재하는 frame 시작 packet에서만
 		// action decision을 수행한다.
-		if (packet && packet->HasFrameMeta())
+		if (IsSfuKnnEnabled() && packet && packet->HasFrameMeta())
 		{
 			// 1. logical frame ID
 			const uint32_t logicalFrameId = packet->GetFrameMetaLogicalFrameId();
@@ -1846,15 +2023,23 @@ namespace RTC
 
 								if (hasPrediction)
 								{
-									candidate.hasPrediction                    = true;
-									candidate.predictedDecodeSlackMs           = prediction.predictedDecodeSlackMs;
+									candidate.hasPrediction = true;
+
+									candidate.predictedDecodeSlackMs = prediction.predictedDecodeSlackMs;
+
 									candidate.predictedDeadlineMissProbability = prediction.deadlineMissProbability;
+
+									candidate.predictedLateProbability = prediction.lateProbability;
+
+									candidate.predictedDropProbability = prediction.dropProbability;
 
 									++predictedCandidateCount;
 
 									candidate.predictorSampleCount = prediction.sampleCount;
-									candidate.debugNeighborCount   = prediction.debugNeighborCount;
-									candidate.debugNeighbors       = prediction.debugNeighbors;
+
+									candidate.debugNeighborCount = prediction.debugNeighborCount;
+
+									candidate.debugNeighbors = prediction.debugNeighbors;
 								}
 								else
 								{
@@ -1905,6 +2090,16 @@ namespace RTC
 					                                   ? (predictedCandidateCount > 0u)
 					                                   : allCandidatesHavePrediction;
 
+					std::array<double, 3> safetyBoundaries{};
+
+					safetyBoundaries.fill(std::numeric_limits<double>::infinity());
+
+					if (!coldStartMode)
+					{
+						this->listener->OnConsumerGetKnnSafetyBoundaries(
+						  this, enoughColdStartSamples, safetyBoundaries);
+					}
+
 					const ActionCandidate* selectedModelAction{ nullptr };
 
 					bool holdingLastKnnAction{ false };
@@ -1922,7 +2117,27 @@ namespace RTC
 						// 자동으로 제외한다.
 						if (knnPredictionsReady)
 						{
-							selectedModelAction = SelectBestKnnAction(candidates);
+							selectedModelAction = SelectBestKnnAction(candidates, safetyBoundaries);
+
+							if (!selectedModelAction)
+							{
+								selectedModelAction = SelectKnnEmergencyAction(candidates);
+
+								if (selectedModelAction)
+								{
+									MS_WARN_TAG(
+									  simulcast,
+									  "[KNN-EMERGENCY] "
+									  "consumer:%s logical:%" PRIu32
+									  " layer:%zu fec:%zu pacing:%zu "
+									  "reason=NO_SAFE_ACTION",
+									  this->id.c_str(),
+									  logicalFrameId,
+									  selectedModelAction->layer,
+									  selectedModelAction->fecIndex,
+									  selectedModelAction->pacingIndex);
+								}
+							}
 						}
 						// Case 2:
 						// KNN에는 이미 진입했지만 일부 candidate prediction 불가: 마지막으로 정상 선택했던 KNN
@@ -1934,7 +2149,8 @@ namespace RTC
 								if (
 								  candidate.layer == this->lastKnnLayer &&
 								  candidate.fecIndex == this->lastKnnFecIndex &&
-								  candidate.pacingIndex == this->lastKnnPacingIndex)
+								  candidate.pacingIndex == this->lastKnnPacingIndex &&
+								  IsKnnSafeAction(candidate, safetyBoundaries))
 								{
 									selectedModelAction  = &candidate;
 									holdingLastKnnAction = true;
@@ -1954,11 +2170,11 @@ namespace RTC
 
 					if (!coldStartMode)
 					{
-						bestL0 = SelectBestKnnActionForLayer(candidates, 0u);
+						bestL0 = SelectBestKnnActionForLayer(candidates, 0u, safetyBoundaries);
 
-						bestL1 = SelectBestKnnActionForLayer(candidates, 1u);
+						bestL1 = SelectBestKnnActionForLayer(candidates, 1u, safetyBoundaries);
 
-						bestL2 = SelectBestKnnActionForLayer(candidates, 2u);
+						bestL2 = SelectBestKnnActionForLayer(candidates, 2u, safetyBoundaries);
 					}
 
 					// yeon: kNN layer ranking debug CSV.
@@ -4594,8 +4810,7 @@ namespace RTC
 			targetIndex = currentIndex - 1u;
 		}
 
-		const auto targetProfile =
-		  GetKnnNetworkProfileAt(this->knnNetworkExperimentOption, targetIndex);
+		const auto targetProfile = GetKnnNetworkProfileAt(this->knnNetworkExperimentOption, targetIndex);
 
 		this->knnColdStartPauseTargetNetworkProfile = targetProfile;
 
@@ -4819,12 +5034,12 @@ namespace RTC
 		this->knnEvaluationNetworkProfile            = this->knnColdStartNetworkProfile;
 		this->knnEvaluationPauseTargetNetworkProfile = RTC::KnnColdStartNetworkProfile::NORMAL;
 
-		this->knnEvaluationPhaseFrameCount    = 0u;
-		this->knnEvaluationNormalFrameCount   = 0u;
-		this->knnEvaluation6MbitFrameCount    = 0u;
-		this->knnEvaluation2MbitFrameCount    = 0u;
-		this->knnEvaluation4MbitFrameCount    = 0u;
-		this->knnEvaluation8MbitFrameCount    = 0u;
+		this->knnEvaluationPhaseFrameCount     = 0u;
+		this->knnEvaluationNormalFrameCount    = 0u;
+		this->knnEvaluation6MbitFrameCount     = 0u;
+		this->knnEvaluation2MbitFrameCount     = 0u;
+		this->knnEvaluation4MbitFrameCount     = 0u;
+		this->knnEvaluation8MbitFrameCount     = 0u;
 		this->knnEvaluationLoss2PctFrameCount  = 0u;
 		this->knnEvaluationLoss5PctFrameCount  = 0u;
 		this->knnEvaluationLoss15PctFrameCount = 0u;
@@ -5116,9 +5331,7 @@ namespace RTC
 				if (this->knnEvaluationPhaseFrameCount >= KnnEvaluationCollectionFrames)
 				{
 					advanceOrFinishEvaluation(
-					  RTC::KnnColdStartNetworkProfile::LIMIT_6MBIT,
-					  "6MBIT",
-					  this->knnEvaluation6MbitFrameCount);
+					  RTC::KnnColdStartNetworkProfile::LIMIT_6MBIT, "6MBIT", this->knnEvaluation6MbitFrameCount);
 				}
 
 				break;
@@ -5138,9 +5351,7 @@ namespace RTC
 				if (this->knnEvaluationPhaseFrameCount >= KnnEvaluationCollectionFrames)
 				{
 					advanceOrFinishEvaluation(
-					  RTC::KnnColdStartNetworkProfile::LIMIT_2MBIT,
-					  "2MBIT",
-					  this->knnEvaluation2MbitFrameCount);
+					  RTC::KnnColdStartNetworkProfile::LIMIT_2MBIT, "2MBIT", this->knnEvaluation2MbitFrameCount);
 				}
 
 				break;
@@ -5160,9 +5371,7 @@ namespace RTC
 				if (this->knnEvaluationPhaseFrameCount >= KnnEvaluationCollectionFrames)
 				{
 					advanceOrFinishEvaluation(
-					  RTC::KnnColdStartNetworkProfile::LIMIT_4MBIT,
-					  "4MBIT",
-					  this->knnEvaluation4MbitFrameCount);
+					  RTC::KnnColdStartNetworkProfile::LIMIT_4MBIT, "4MBIT", this->knnEvaluation4MbitFrameCount);
 				}
 
 				break;
@@ -5260,7 +5469,7 @@ namespace RTC
 				decision.knnEvaluationNetworkProfile       = this->knnEvaluationNetworkProfile;
 				decision.knnEvaluationTargetNetworkProfile = this->knnEvaluationNetworkProfile;
 				decision.knnEvaluationPhaseFrameIndex      = 0u;
-				decision.knnEvaluationTerminalFrame = true;  // 추가
+				decision.knnEvaluationTerminalFrame        = true; // 추가
 				decision.skipKnnTrainingSample             = true;
 				break;
 			}

@@ -373,6 +373,8 @@ namespace RTC
 		  const RTC::SlackFeature& feature,
 		  const RTC::SlackActionIdentity& action,
 		  RTC::SlackPrediction& prediction) override;
+		bool OnConsumerGetKnnSafetyBoundaries(
+		  RTC::Consumer* consumer, bool coldStartCompleted, std::array<double, 3>& boundaries) override;
 		bool OnConsumerGetSlackRuntimeActionState(
 		  RTC::Consumer* consumer, RTC::SlackRuntimeActionState& state) override;
 		void OnConsumerSetColdStartPacing(RTC::Consumer* consumer, bool enabled) override;
